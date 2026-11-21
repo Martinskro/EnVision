@@ -10,6 +10,8 @@ const MIN_DISPLAY_SCORE = 0.3; // numbered boxes; tracking also uses weaker dete
 const AUTO_CONFIRM_AFTER_MS = 1000; // phone mode: on target this long → ask Mistral "what is this?"
 const HAND_CONFIRM_AFTER_MS = 1500; // hand mode: fingertip on the beer this long → "You're holding a …"
 const HAND_BOX_MARGIN = 0.15; // fingertip touching the can's edge counts as inside
+const DETECT_EVERY = 3; // hand mode: object detector on every 3rd frame, hand tracker on the rest
+const HAND_NEAR_MARGIN = 0.5; // hand this close to the beer → hold the box (hand occludes the can)
 const params = new URLSearchParams(location.search);
 
 const $ = (id) => document.getElementById(id);
@@ -44,6 +46,7 @@ const state = {
 let detector = null;
 let hands = null; // HandLandmarker, loaded in the background after Start
 let lastVideoTime = -1;
+let frameNo = 0;
 
 // ---------- UI wiring ----------
 
@@ -282,11 +285,13 @@ function loop(now) {
 
   syncCanvasSize();
 
-  // Hand mode + beer locked: the phone is static and the box is frozen, so only the hand
-  // tracker runs (no need to share frames with the object detector).
+  // Hand mode + beer locked: alternate frames – hand tracker on most frames, object detector
+  // every DETECT_EVERY-th frame to keep following the beer (chest-mounted phone still moves a bit).
   const handActive = state.phase === 'guiding' && state.handMode && !!hands;
+  frameNo++;
+  const runDetector = !handActive || frameNo % DETECT_EVERY === 0;
 
-  if (handActive) {
+  if (!runDetector) {
     try {
       processHand(hands.detectForVideo(video, now));
     } catch (err) {
@@ -304,10 +309,11 @@ function loop(now) {
       return;
     }
     processDetections(result.detections);
-    state.hand = null;
+    if (!handActive) state.hand = null; // keep the last hand between alternating frames
   }
 
   if (state.phase === 'guiding' && state.lock) {
+    if (runDetector) updateLock(now, handActive);
     const silent = !!window.speechSynthesis?.speaking;
     if (handActive) {
       if (state.hand) {
@@ -317,7 +323,6 @@ function loop(now) {
         noPointerTick(now, { silent });
       }
     } else {
-      updateLock(now);
       state.guidance = guide(now, { x: 0.5, y: 0.5 }, normBox(state.lock.box), { silent });
     }
     handleArrival(now, handActive);
@@ -354,13 +359,17 @@ function handleArrival(now, handActive) {
 
 // The phone moves in Level 1, so follow the locked beer by matching it to this frame's detections.
 // If nothing matches (occluded / missed), keep the last known box.
-function updateLock(now) {
+function updateLock(now, handActive) {
   const lock = state.lock;
+  // Hand on/near the can: the detector can't see it properly and might match a decoy → hold.
+  lock.held = !!(handActive && state.hand && isInside(state.hand.tip, expandBox(normBox(lock.box), HAND_NEAR_MARGIN)));
+  if (lock.held) return;
   const diag = Math.hypot(video.videoWidth, video.videoHeight);
   const lockArea = lock.box.width * lock.box.height;
   // The longer we've lost it, the further we search (phone may have moved a lot meanwhile).
   const lostSec = (now - lock.lastSeen) / 1000;
-  const radius = Math.min(0.35, 0.12 + 0.25 * lostSec);
+  // In hand mode the phone barely moves, so never widen the search (avoids jumping to a decoy).
+  const radius = handActive ? 0.12 : Math.min(0.35, 0.12 + 0.25 * lostSec);
   let best = null;
   let bestScore = 0;
   // Search every detection (any label, score ≥ 0.2): the can's label/score flickers frame to frame.
@@ -417,6 +426,10 @@ async function handleHandFailure() {
   }
   handFailedOnce = true;
   await loadHands(true);
+}
+
+function isInside(p, b) {
+  return p.x >= b.x0 && p.x <= b.x1 && p.y >= b.y0 && p.y <= b.y1;
 }
 
 function expandBox(b, f) {
@@ -502,7 +515,7 @@ function draw() {
 
   if (state.lock) {
     const name = state.lock.brand ? `BEER: ${state.lock.brand}` : 'BEER';
-    ctx.setLineDash(state.lock.seen ? [] : [unit * 2, unit]);
+    ctx.setLineDash(state.lock.seen || state.lock.held ? [] : [unit * 2, unit]);
     drawBox(ctx, { label: name, box: state.lock.box }, '#ffd600', unit * 1.6, { number: false, label: true });
     ctx.setLineDash([]);
   }
@@ -577,7 +590,9 @@ function renderDebug() {
     `targets: ${state.targets.map(fmt).join(', ') || '—'}`,
     `others: ${state.others.map(fmt).join(', ') || '—'}`,
     lock
-      ? `lock: ${lock.source} ${lock.brand || ''} ${lock.seen ? 'seen' : `LOST ${((performance.now() - lock.lastSeen) / 1000).toFixed(1)}s`}`
+      ? `lock: ${lock.source} ${lock.brand || ''} ${
+          lock.held ? 'HELD (hand near)' : lock.seen ? 'seen' : `LOST ${((performance.now() - lock.lastSeen) / 1000).toFixed(1)}s`
+        }`
       : 'lock: —',
     gd
       ? `guide: dx=${gd.dx.toFixed(2)} dy=${gd.dy.toFixed(2)} f=${Math.round(gd.freq)}Hz every ${Math.round(gd.interval)}ms${gd.inside ? ' ON TARGET' : ''}`
