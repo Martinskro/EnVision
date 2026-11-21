@@ -279,13 +279,16 @@ async function findBeer() {
     const res = await askMistral('pick', image, picks.length);
     const { beer, kind, objects } = res.result || {};
     state.mistral = `pick → beer=${beer} kind=${kind} ${JSON.stringify(objects || {})} (${res.clientMs}ms)`;
-    const chosen = picks.find((t) => t.n === Number(beer));
+    let chosen = picks.find((t) => t.n === Number(beer));
+    let chosenKind = normKind(kind);
     if (!chosen) {
-      speak("I couldn't find a beer here. Try pointing at the table again.");
-      state.phase = 'detecting';
-      return;
+      // Never dead-end the demo: use Mistral's own per-box labels (can > bottle), else biggest bottle.
+      const kindOf = (t) => normKind(objects?.[t.n] ?? objects?.[String(t.n)]);
+      chosen = picks.find((t) => kindOf(t) === 'can') || picks.find((t) => kindOf(t) === 'bottle') || largest(picks);
+      chosenKind = kindOf(chosen) || (chosen.label === 'bottle' ? 'bottle' : null);
+      state.mistral += ' → no pick, fallback #' + chosen.n;
     }
-    lockTarget(chosen, normKind(kind), 'mistral', picks.length);
+    lockTarget(chosen, chosenKind, chosen.n === Number(beer) ? 'mistral' : 'mistral-fallback', picks.length);
   } catch (err) {
     console.error(err);
     state.mistral = `pick FAILED: ${err.message}`;
