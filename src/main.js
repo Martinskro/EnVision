@@ -1,6 +1,6 @@
 import './style.css';
 import { unlockAudio, audioState, beep, speak } from './audio.js';
-import { createObjectDetector, createHandLandmarker } from './vision.js';
+import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vision.js';
 import { askMistral, snapshot } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
 
@@ -586,7 +586,7 @@ function renderDebug() {
   const lock = state.lock;
   const gd = state.guidance;
   debugEl.textContent = [
-    `state: ${state.phase}${state.busy ? ' (mistral…)' : ''}   delegate: ${state.delegate}`,
+    `state: ${state.phase}${state.busy ? ' (mistral…)' : ''}   detector: ${DETECTOR_NAME} [${state.delegate}]`,
     `fps: ${state.fps.toFixed(1)}   video: ${video.videoWidth}x${video.videoHeight}   audio: ${audioState()}`,
     `targets: ${state.targets.map(fmt).join(', ') || '—'}`,
     `others: ${state.others.map(fmt).join(', ') || '—'}`,

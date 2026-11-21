@@ -2,8 +2,11 @@ import { FilesetResolver, HandLandmarker, ObjectDetector } from '@mediapipe/task
 
 // Keep the WASM version identical to the npm package version (0.10.14).
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
-const DETECTOR_MODEL =
-  'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite';
+// EfficientDet-Lite2 (448 px input) is clearly more accurate on small objects like a can than
+// Lite0 (320 px) but slower. Add ?lite0 to the URL to switch back if fps drops too far.
+const DETECTOR_VARIANT = new URLSearchParams(location.search).has('lite0') ? 'efficientdet_lite0' : 'efficientdet_lite2';
+const DETECTOR_MODEL = `https://storage.googleapis.com/mediapipe-models/object_detector/${DETECTOR_VARIANT}/float16/1/${DETECTOR_VARIANT}.tflite`;
+export const DETECTOR_NAME = DETECTOR_VARIANT.replace('efficientdet_', '');
 const HAND_MODEL =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
