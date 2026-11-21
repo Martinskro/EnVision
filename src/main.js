@@ -6,6 +6,9 @@ import { guide, noPointerTick, resetGuidance } from './guidance.js';
 import { colorHist, histSim } from './appearance.js';
 import { startVoice, voiceState, isListening, voiceReady } from './voice.js';
 
+// URL settings – declared first: constants below read from it.
+const params = new URLSearchParams(location.search);
+
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
 const MIN_DISPLAY_SCORE = 0.3; // numbered boxes; tracking also uses weaker detections
@@ -24,7 +27,6 @@ const HAND_KEEP_MS = 400; // keep the last hand this long when the tracker drops
 const HAND_BOX_MARGIN = 0.15; // fingertip touching the can's edge counts as inside
 const DETECT_EVERY = 3; // hand mode: object detector on every 3rd frame, hand tracker on the rest
 const HAND_NEAR_MARGIN = 0.5; // hand this close to the beer → hold the box (hand occludes the can)
-const params = new URLSearchParams(location.search);
 // Voice commands are opt-in (?voice): the always-on mic made iOS audio unreliable.
 const VOICE_ON = params.has('voice');
 
