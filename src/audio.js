@@ -104,6 +104,17 @@ export function speak(text) {
   else say(); // keep synchronous when possible (first speak must be inside the Start tap on iOS)
 }
 
+// Unlock speech on iOS without saying anything: call inside the Start tap.
+export function unlockSpeech() {
+  try {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    window.speechSynthesis.speak(u);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function isSpeaking() {
   return performance.now() < speakingUntil;
 }

@@ -1,10 +1,10 @@
 import './style.css';
-import { unlockAudio, audioState, beep, speak, success, isSpeaking, onSpeak } from './audio.js';
+import { unlockAudio, unlockSpeech, audioState, beep, speak, success, isSpeaking, onSpeak } from './audio.js';
 import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vision.js';
 import { askMistral, snapshot, snapshotCrop } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
 import { colorHist, histSim } from './appearance.js';
-import { startVoice, voiceState, voiceGate, isListening } from './voice.js';
+import { startVoice, voiceState, voiceGate, isListening, voiceReady } from './voice.js';
 
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
@@ -98,9 +98,10 @@ video.addEventListener('pause', () => {
 // ---------- Start ----------
 
 async function start() {
-  // Everything audio-related must happen synchronously inside the tap (iOS).
+  // Everything audio-related must be unlocked synchronously inside the tap (iOS) – silently,
+  // so Helen doesn't talk over the camera/mic permission prompts. She greets once they're done.
   unlockAudio();
-  speak("Hi, I'm Helen.");
+  unlockSpeech();
   // Voice commands ("Hey Helen, where is my beer?"). Must start inside the tap on iOS.
   if (!params.has('novoice')) {
     startVoice(
@@ -135,6 +136,7 @@ async function start() {
     state.phase = 'detecting';
     requestAnimationFrame(loop);
     loadHands(); // background – Level 1 works while this loads
+    greetWhenReady();
   } catch (err) {
     console.error(err);
     state.phase = 'error';
@@ -142,6 +144,18 @@ async function start() {
     startMsg.textContent = `Error: ${state.error} — tap Start to retry`;
     startBtn.disabled = false;
   }
+}
+
+// Greet only after camera + mic permissions are settled (mic: granted, refused, or 5 s max).
+async function greetWhenReady() {
+  const voiceOn = !params.has('novoice');
+  if (voiceOn) await Promise.race([voiceReady, new Promise((r) => setTimeout(r, 5000))]);
+  const canTalk = voiceOn && isListening();
+  speak(
+    canTalk
+      ? "Hi, I'm Helen. Say: Hey Helen, where is my beer?"
+      : "Hi, I'm Helen. Tap the bottom of the screen to find your beer.",
+  );
 }
 
 async function startCamera() {

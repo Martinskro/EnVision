@@ -36,6 +36,12 @@ let lastFire = 0;
 let handlers = {};
 let consumed = 0; // results in this session already used for a command – never re-match them
 let isSpeaking = () => false;
+let markReady = () => {};
+// Resolves once the mic is actually running (permission granted) or refused/unsupported.
+export const voiceReady = new Promise((resolve) => {
+  markReady = resolve;
+  if (!SR) resolve('unsupported');
+});
 
 // Call from the Start tap handler (mic permission prompt needs a user gesture on iOS).
 // onIntent: { find, holding, describe, stop, wake } callbacks. speaking(): true while TTS talks.
@@ -66,7 +72,9 @@ export function startVoice(onIntent, speaking) {
     }
     if (handle(text, e.results[n - 1].isFinal)) consumed = n;
   };
+  rec.onstart = () => markReady('listening');
   rec.onerror = (e) => {
+    markReady(`error: ${e.error}`);
     voiceState.status = `error: ${e.error}`;
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') enabled = false;
   };
