@@ -32,6 +32,7 @@ let enabled = false;
 let armedUntil = 0;
 let lastFire = 0;
 let handlers = {};
+let consumed = 0; // results in this session already used for a command – never re-match them
 let isSpeaking = () => false;
 
 // Call from the Start tap handler (mic permission prompt needs a user gesture on iOS).
@@ -51,15 +52,17 @@ export function startVoice(onIntent, speaking) {
     // "Hey Helen" and "where is my beer" often arrive as separate results after a short pause,
     // so match on the last two results joined, not only the latest one.
     const n = e.results.length;
+    const from = Math.max(consumed, n - 2);
+    if (from >= n) return;
     const parts = [];
-    for (let i = Math.max(0, n - 2); i < n; i++) parts.push(e.results[i][0].transcript);
+    for (let i = from; i < n; i++) parts.push(e.results[i][0].transcript);
     const text = parts.join(' ').toLowerCase().replace(/[.,!?]/g, ' ').replace(/\s+/g, ' ').trim();
     voiceState.heard = text;
     if (isSpeaking()) {
       voiceState.why = 'ignored: Helen is speaking';
       return;
     }
-    handle(text, e.results[n - 1].isFinal);
+    if (handle(text, e.results[n - 1].isFinal)) consumed = n;
   };
   rec.onerror = (e) => {
     voiceState.status = `error: ${e.error}`;
@@ -86,6 +89,7 @@ function safeStart() {
   if (!enabled) return;
   try {
     rec.start();
+    consumed = 0; // new session → result indices start from 0 again
     voiceState.status = 'listening';
   } catch {
     /* already started – fine */
@@ -114,7 +118,7 @@ function handle(text, isFinal) {
 
   if (hit) {
     fire(hit.intent, now, text);
-    return;
+    return true;
   }
   voiceState.why = 'wake word, waiting for command';
   voiceState.status = 'armed';
@@ -132,11 +136,7 @@ function fire(intent, now, text) {
   voiceState.status = 'listening';
   voiceState.lastIntent = `${intent} ← "${text}"`;
   voiceState.why = `fired: ${intent}`;
-  // Restart the session so the same utterance isn't matched again by later interim results.
-  try {
-    rec.abort();
-  } catch {
-    /* ignore */
-  }
+  // No rec.abort()/restart here: on iOS that reconfigures audio and pauses the camera video.
+  // Already-used results are skipped via `consumed` instead.
   handlers[intent]?.();
 }

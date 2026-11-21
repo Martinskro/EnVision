@@ -54,6 +54,10 @@ let detector = null;
 let hands = null; // HandLandmarker, loaded in the background after Start
 let lastVideoTime = -1;
 let frameNo = 0;
+let lastFrameAt = 0; // for the camera watchdog
+let lastRecoverAt = 0;
+let recoverTries = 0;
+let cameraRecoveries = 0;
 
 // ---------- UI wiring ----------
 
@@ -66,6 +70,10 @@ $('resetBtn').addEventListener('click', reset);
 handBtn.addEventListener('click', toggleHandMode);
 renderHandBtn();
 if (params.has('nodebug')) debugEl.classList.add('hidden');
+// iOS pauses the camera <video> when the audio session changes (speech recognition) → resume at once.
+video.addEventListener('pause', () => {
+  if (state.phase !== 'idle') video.play().catch(() => {});
+});
 
 // ---------- Start ----------
 
@@ -172,6 +180,26 @@ function toggleHandMode() {
 function renderHandBtn() {
   handBtn.textContent = state.handMode ? 'Hand: ON' : 'Hand: OFF';
   handBtn.classList.toggle('on', state.handMode);
+}
+
+// Camera watchdog: first try to resume the paused video; if frames still don't come, restart the camera.
+async function recoverCamera(now) {
+  if (now - lastRecoverAt < 1500) return;
+  lastRecoverAt = now;
+  cameraRecoveries++;
+  recoverTries++;
+  const track = video.srcObject?.getVideoTracks?.()[0];
+  const dead = !track || track.readyState === 'ended';
+  try {
+    if (dead || recoverTries > 2) {
+      video.srcObject?.getTracks().forEach((t) => t.stop());
+      await startCamera();
+    } else {
+      await video.play();
+    }
+  } catch (err) {
+    console.warn('camera recover failed', err);
+  }
 }
 
 async function requestWakeLock() {
@@ -328,8 +356,14 @@ let lastDebugUpdate = 0;
 function loop(now) {
   requestAnimationFrame(loop);
   if (!['detecting', 'asking', 'guiding', 'done'].includes(state.phase) || video.readyState < 2) return;
-  if (video.currentTime === lastVideoTime) return; // no new camera frame yet
+  if (video.currentTime === lastVideoTime) {
+    // No new camera frame. iOS pauses the <video> when speech recognition (re)starts → recover.
+    if (lastFrameAt && now - lastFrameAt > 1000) recoverCamera(now);
+    return;
+  }
   lastVideoTime = video.currentTime;
+  lastFrameAt = now;
+  recoverTries = 0;
 
   syncCanvasSize();
 
@@ -716,7 +750,7 @@ function renderDebug() {
   const gd = state.guidance;
   debugEl.textContent = [
     `state: ${state.phase}${state.busy ? ' (mistral…)' : ''}   detector: ${DETECTOR_NAME} [${state.delegate}]`,
-    `fps: ${state.fps.toFixed(1)}   video: ${video.videoWidth}x${video.videoHeight}   audio: ${audioState()}`,
+    `fps: ${state.fps.toFixed(1)}   video: ${video.videoWidth}x${video.videoHeight}   audio: ${audioState()}   cam-recover: ${cameraRecoveries}`,
     `targets: ${state.targets.map(fmt).join(', ') || '—'}`,
     `others: ${state.others.map(fmt).join(', ') || '—'}`,
     lock
