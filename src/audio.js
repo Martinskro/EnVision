@@ -155,3 +155,15 @@ export function isSpeaking() {
 export function success() {
   [523, 659, 784, 1047].forEach((f, i) => beep({ freq: f, duration: 0.14, gain: 0.3, delay: i * 0.11 }));
 }
+
+// Soft two-note "checking…" while Mistral verifies the grab.
+export function checking() {
+  beep({ freq: 880, duration: 0.06, gain: 0.2, delay: 0 });
+  beep({ freq: 880, duration: 0.06, gain: 0.2, delay: 0.15 });
+}
+
+// Low falling "not yet" when the grab wasn't confirmed.
+export function notYet() {
+  beep({ freq: 400, duration: 0.12, gain: 0.25, delay: 0 });
+  beep({ freq: 300, duration: 0.16, gain: 0.25, delay: 0.13 });
+}

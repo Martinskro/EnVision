@@ -1,5 +1,5 @@
 import './style.css';
-import { unlockAudio, unlockSpeech, audioState, beep, speak, success, isSpeaking, onSpeak } from './audio.js';
+import { unlockAudio, unlockSpeech, audioState, beep, speak, success, checking, notYet, isSpeaking, onSpeak } from './audio.js';
 import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vision.js';
 import { askMistral, snapshot, snapshotCrop } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
@@ -12,7 +12,12 @@ const MIN_DISPLAY_SCORE = 0.3; // numbered boxes; tracking also uses weaker dete
 const AUTO_CONFIRM_AFTER_MS = 1000; // phone mode: on target this long → ask Mistral "what is this?"
 const GRAB_AFTER_MS = 1000; // hand mode: hand on the beer this long → grabbed (local decision)
 const GRAB_GRACE_MS = 700; // hand may drop out / slip off this long without restarting the timer
-const GRAB_MAX_CHECKS = 4; // Mistral double-checks per lock – protects the credits
+const GRAB_MAX_CHECKS = 4; // Mistral grab checks per lock – after that, trust the local check
+const GRAB_VERIFY_TIMEOUT_MS = 4000; // Mistral slower than this → trust the local check
+// Depth check: a hand right in front of the camera can cover the bottle in the image while being
+// far from it. At the bottle's depth a palm is about can-sized; nearer the camera it looks bigger.
+// palm size / beer box width must be ≤ this. Tune with ?ratio=2.4 (debug shows the live ratio).
+const MAX_HAND_RATIO = Number(params.get('ratio')) || 2.0;
 const GRAB_BOX_MARGIN = 0.3; // hand landmarks within this margin of the box count as "on the beer"
 const GRAB_MIN_LANDMARKS = 4; // …and this many of the 21 landmarks must be there
 const HAND_KEEP_MS = 400; // keep the last hand this long when the tracker drops out (gripping occludes it)
@@ -469,16 +474,28 @@ function loop(now) {
 }
 
 // Once the pointer has stayed on the beer for a moment, confirm with Mistral (once per lock).
+// Palm size in video pixels: max of palm width (index→pinky knuckle, scaled to palm length) and
+// palm length (wrist→middle knuckle). Using both is robust when one of them is foreshortened.
+function palmSize(lm) {
+  const W = video.videoWidth;
+  const H = video.videoHeight;
+  const d = (a, b) => Math.hypot((lm[a].x - lm[b].x) * W, (lm[a].y - lm[b].y) * H);
+  return Math.max(d(5, 17) * 1.25, d(0, 9));
+}
+
 function handleArrival(now, handActive) {
   const lock = state.lock;
   // Phone mode: crosshair on the beer. Hand mode: fingertip on it, OR several hand landmarks on it
-  // (when gripping, the index fingertip is often hidden behind the can).
+  // (when gripping, the index fingertip is often hidden behind the can) – AND the hand must be at
+  // roughly the bottle's depth (not just in front of it, closer to the camera).
   let onBeer = !!state.guidance?.inside;
   let n = 0;
+  let ratio = 0;
   if (handActive && state.hand) {
     const zone = expandBox(normBox(lock.box), GRAB_BOX_MARGIN);
     n = state.hand.landmarks.filter((p) => isInside(p, zone)).length;
-    onBeer = onBeer || n >= GRAB_MIN_LANDMARKS;
+    ratio = palmSize(state.hand.landmarks) / Math.max(1, lock.box.width);
+    onBeer = (onBeer || n >= GRAB_MIN_LANDMARKS) && ratio <= MAX_HAND_RATIO;
   }
 
   if (onBeer) {
@@ -489,7 +506,9 @@ function handleArrival(now, handActive) {
   }
   const held = lock.insideSince ? now - lock.insideSince : 0;
   lock.grab = handActive
-    ? `${state.hand ? `${n}/21 on beer` : 'no hand'}  on-beer ${(held / 1000).toFixed(1)}s / ${GRAB_AFTER_MS / 1000}s`
+    ? state.hand
+      ? `${n}/21 on beer  size ${ratio.toFixed(2)}${ratio > MAX_HAND_RATIO ? ' TOO CLOSE TO CAMERA' : ' ok'} (max ${MAX_HAND_RATIO})  on-beer ${(held / 1000).toFixed(1)}s`
+      : 'no hand'
     : '';
   if (!lock.insideSince) return;
 
@@ -502,40 +521,49 @@ function handleArrival(now, handActive) {
     return;
   }
 
-  // Level 2: hand on the beer long enough → GRABBED (local decision, works without Mistral),
-  // then Mistral double-checks the object in the background.
-  if (held > GRAB_AFTER_MS) grabbed(lock);
+  // Level 2: hand on the beer at the right depth for a moment → Mistral checks the grip.
+  if (held > GRAB_AFTER_MS && !lock.verifying) verifyGrab(lock);
 }
 
 function grabbed(lock) {
   state.phase = 'done'; // stops guidance beeps
   success();
   setTimeout(() => speak(`Got it! That's your beer${lock.kind ? ' ' + lock.kind : ''}. Cheers!`), 450);
-  if (lock.grabChecks < GRAB_MAX_CHECKS) {
-    lock.grabChecks++;
-    verifyGrab(lock);
-  }
 }
 
-// Mistral looks at a close-up of the hand. Only a clear "you're holding something ELSE" overrides
-// the local grab; slow / unsure / failed answers leave it as is.
+// Mistral looks at a close-up: are the fingers actually around the can (not just in front of it)?
+// Yes → grabbed. No → "not yet", keep guiding. Slow / failed / out of checks → trust the local check.
 async function verifyGrab(lock) {
-  const image = snapshotCrop(video, lock.box, 1); // capture now, before the hand moves on
+  if (lock.grabChecks >= GRAB_MAX_CHECKS) {
+    state.mistral = 'verify: out of checks → trusting local grab';
+    grabbed(lock);
+    return;
+  }
+  lock.verifying = true;
+  lock.grabChecks++;
+  checking();
+  const image = snapshotCrop(video, lock.box, 1);
   try {
-    const res = await askMistral('held', image, 0, lock.kind);
+    const res = await askMistral('held', image, 0, lock.kind, GRAB_VERIFY_TIMEOUT_MS);
     const r = res.result || {};
     const obj = String(r.object || '').toLowerCase().trim();
-    const wrong = !!r.holding && !!obj && obj !== 'none' && !/can|bottle/.test(obj);
-    state.mistral = `verify#${lock.grabChecks} → holding=${r.holding} object=${obj} ${wrong ? 'WRONG' : 'ok'} (${res.clientMs}ms)`;
-    if (wrong && state.lock === lock && state.phase === 'done') {
-      speak(`Wait, that's a ${obj}, not your beer. Follow the beeps again.`, { interrupt: true });
+    state.mistral = `verify#${lock.grabChecks} → holding=${r.holding} object=${obj} (${res.clientMs}ms)`;
+    if (state.lock !== lock || state.phase !== 'guiding') return; // reset meanwhile
+    if (r.holding && obj && obj !== 'none' && !/can|bottle/.test(obj)) {
+      speak(`That's a ${obj}, not your beer.`, { interrupt: true });
       lock.insideSince = 0;
-      lock.lastOnBeerAt = 0;
-      state.phase = 'guiding';
+    } else if (r.holding) {
+      grabbed(lock);
+    } else {
+      notYet(); // hand near, but not gripping yet – keep guiding, check again after another 1 s
+      lock.insideSince = 0;
     }
   } catch (err) {
     console.error(err);
-    state.mistral = `verify FAILED (kept local grab): ${err.message}`;
+    state.mistral = `verify FAILED (trusting local grab): ${err.message}`;
+    if (state.lock === lock && state.phase === 'guiding') grabbed(lock);
+  } finally {
+    lock.verifying = false;
   }
 }
 

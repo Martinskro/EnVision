@@ -25,7 +25,9 @@ function prompts(task, count, kind) {
   if (task === 'held') {
     return [
       'Close-up from a chest-mounted camera. A blind person is reaching for an object on a table.',
-      'Is a hand holding, gripping or touching an object? If yes, what kind of object is it?',
+      'Is a hand actually gripping an object – fingers wrapped around it or clearly touching it?',
+      'A hand that is only in front of the object, above it, or closer to the camera does NOT count.',
+      'If it is gripping, what kind of object is it?',
       `Kinds: ${KINDS}. Ignore brands and labels.`,
       'Reply with JSON only, exactly this shape:',
       '{"holding": <true|false>, "object": "<kind or none>"}',

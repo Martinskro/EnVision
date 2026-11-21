@@ -2,9 +2,9 @@
 
 const TIMEOUT_MS = 15000;
 
-export async function askMistral(task, imageDataUrl, count = 0, kind = null) {
+export async function askMistral(task, imageDataUrl, count = 0, kind = null, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const t0 = performance.now();
   try {
     const r = await fetch('/api/mistral', {
@@ -18,7 +18,7 @@ export async function askMistral(task, imageDataUrl, count = 0, kind = null) {
     if (!data.ok) throw new Error(data.error || `HTTP ${r.status}`);
     return data;
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error(`Mistral timed out after ${TIMEOUT_MS / 1000}s`);
+    if (err.name === 'AbortError') throw new Error(`Mistral timed out after ${timeoutMs / 1000}s`);
     throw err;
   } finally {
     clearTimeout(timer);
