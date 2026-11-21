@@ -4,6 +4,7 @@ import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vis
 import { askMistral, snapshot, snapshotCrop } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
 import { colorHist, histSim } from './appearance.js';
+import { startVoice, voiceState } from './voice.js';
 
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
@@ -71,7 +72,20 @@ if (params.has('nodebug')) debugEl.classList.add('hidden');
 async function start() {
   // Everything audio-related must happen synchronously inside the tap (iOS).
   unlockAudio();
-  speak('Starting');
+  speak("Hi, I'm Helen.");
+  // Voice commands ("Hey Helen, where is my beer?"). Must start inside the tap on iOS.
+  if (!params.has('novoice')) {
+    startVoice(
+      {
+        find: findBeer,
+        holding: () => confirmObject(),
+        describe: describeTable,
+        stop: reset,
+        wake: () => speak('Yes?'),
+      },
+      () => !!window.speechSynthesis?.speaking,
+    );
+  }
   beep({ freq: 660, duration: 0.12 });
   requestWakeLock();
 
@@ -274,6 +288,25 @@ async function confirmObject() {
     console.error(err);
     state.mistral = `confirm FAILED: ${err.message}`;
     speak(state.lock ? "You're on the beer." : "Sorry, I couldn't check that.");
+  } finally {
+    state.busy = false;
+  }
+}
+
+// "Hey Helen, what's on the table?" – Mistral describes the scene.
+async function describeTable() {
+  if (state.busy || !video.videoWidth) return;
+  state.busy = true;
+  speak('Let me look.');
+  try {
+    const res = await askMistral('describe', snapshot(video, null, 0.8));
+    const say = res.result?.say;
+    state.mistral = `describe → "${say}" (${res.clientMs}ms)`;
+    speak(say || "I couldn't make out the table.");
+  } catch (err) {
+    console.error(err);
+    state.mistral = `describe FAILED: ${err.message}`;
+    speak("Sorry, I couldn't look at the table right now.");
   } finally {
     state.busy = false;
   }
@@ -698,6 +731,7 @@ function renderDebug() {
     `hand: ${state.handMode ? 'ON' : 'off'} [${state.handDelegate}] ${
       state.hand ? `tip=(${state.hand.tip.x.toFixed(2)}, ${state.hand.tip.y.toFixed(2)})` : 'no hand'
     }`,
+    `voice: ${voiceState.status}  heard: "${voiceState.heard}"${voiceState.lastIntent ? `\n  → ${voiceState.lastIntent}` : ''}`,
     `mistral: ${state.mistral}`,
     state.error ? `ERROR: ${state.error}` : '',
   ]

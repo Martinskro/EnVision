@@ -1,5 +1,5 @@
 // Vercel serverless function: POST /api/mistral
-// Body: { task: "pick" | "confirm" | "held", image: "data:image/jpeg;base64,...", count?: number }
+// Body: { task: "pick" | "confirm" | "held" | "describe", image: "data:image/jpeg;base64,...", count?: number }
 // The Mistral key lives only here (MISTRAL_API_KEY env var), never in client code.
 // Locally the same handler is served by the Vite dev plugin in vite.config.js.
 
@@ -24,6 +24,14 @@ function prompts(task, count) {
       'Reply with JSON only, exactly this shape:',
       '{"holding": <true|false>, "object": "<short name or null>", "brand": "<brand or null>", "is_beer": <true|false>,',
       ' "say": "<one short sentence to speak to the user, e.g. \\"You\'re holding a Tuborg. Cheers!\\" or \\"That\'s the water bottle, not your beer.\\">"}',
+    ].join('\n');
+  }
+  if (task === 'describe') {
+    return [
+      "Photo from a blind person's chest-mounted camera, looking at a table in front of them.",
+      'Briefly tell them what is on the table and where (left / middle / right, near / far).',
+      'Mention any drinks and their brands. Maximum 2 short sentences, friendly, no filler.',
+      'Reply with JSON only, exactly this shape: {"say": "<what to speak aloud>"}',
     ].join('\n');
   }
   // confirm
@@ -53,8 +61,8 @@ export default async function handler(req, res) {
   if (!key) return res.status(500).json({ ok: false, error: 'MISTRAL_API_KEY not set' });
 
   const { task, image, count } = req.body || {};
-  if (!['pick', 'confirm', 'held'].includes(task)) {
-    return res.status(400).json({ ok: false, error: 'task must be "pick", "confirm" or "held"' });
+  if (!['pick', 'confirm', 'held', 'describe'].includes(task)) {
+    return res.status(400).json({ ok: false, error: 'task must be pick, confirm, held or describe' });
   }
   if (typeof image !== 'string' || !image.startsWith('data:image/') || image.length > MAX_IMAGE_CHARS) {
     return res.status(400).json({ ok: false, error: 'image must be a data:image/... URL under 4 MB' });
