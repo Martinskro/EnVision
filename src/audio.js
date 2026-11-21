@@ -3,6 +3,15 @@ import { pauseVoice } from './voice.js';
 
 let ctx = null;
 
+// The browser's speech queue survives reloads, so leftover phrases from the previous page would
+// play before Start. Clear it on load and when leaving the page.
+try {
+  window.speechSynthesis?.cancel();
+  window.addEventListener('pagehide', () => window.speechSynthesis?.cancel());
+} catch {
+  /* ignore */
+}
+
 export function unlockAudio() {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!ctx) ctx = new AC();
