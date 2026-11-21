@@ -4,7 +4,7 @@ import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vis
 import { askMistral, snapshot, snapshotCrop } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
 import { colorHist, histSim } from './appearance.js';
-import { startVoice, voiceState, voiceGate, isListening, voiceReady } from './voice.js';
+import { startVoice, voiceState, isListening, voiceReady } from './voice.js';
 
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
@@ -153,7 +153,7 @@ async function greetWhenReady() {
   const canTalk = voiceOn && isListening();
   speak(
     canTalk
-      ? "Hi, I'm Helen. Say: Hey Helen, where is my beer?"
+      ? "Hi, I'm Helen. Ask me where your beer is."
       : "Hi, I'm Helen. Tap the bottom of the screen to find your beer.",
   );
 }
@@ -400,8 +400,6 @@ function loop(now) {
   lastFrameAt = now;
   recoverTries = 0;
 
-  // Listen only when Helen is quiet and we're not guiding (mic on = quiet/cut speech + beeps on iOS).
-  voiceGate(!isSpeaking() && !state.busy && ['detecting', 'done'].includes(state.phase), now);
 
   syncCanvasSize();
 

@@ -34,7 +34,9 @@ let gateOpenSince = 0;
 let armedUntil = 0;
 let lastFire = 0;
 let handlers = {};
-let consumed = 0; // results in this session already used for a command – never re-match them
+let consumed = 0; // results in this session already used (command or echo) – never re-match them
+let lastSpokeAt = 0;
+const ECHO_TAIL_MS = 1200; // recognition results arrive late – ignore this long after Helen stops
 let isSpeaking = () => false;
 let markReady = () => {};
 // Resolves once the mic is actually running (permission granted) or refused/unsupported.
@@ -66,8 +68,13 @@ export function startVoice(onIntent, speaking) {
     for (let i = from; i < n; i++) parts.push(e.results[i][0].transcript);
     const text = parts.join(' ').toLowerCase().replace(/[.,!?]/g, ' ').replace(/\s+/g, ' ').trim();
     voiceState.heard = text;
-    if (isSpeaking()) {
+    // The mic is always on, so it hears Helen herself. Drop (and consume) anything recognised
+    // while she speaks and shortly after.
+    const now = performance.now();
+    if (isSpeaking()) lastSpokeAt = now;
+    if (now - lastSpokeAt < ECHO_TAIL_MS) {
       voiceState.why = 'ignored: Helen is speaking';
+      consumed = n;
       return;
     }
     if (handle(text, e.results[n - 1].isFinal)) consumed = n;

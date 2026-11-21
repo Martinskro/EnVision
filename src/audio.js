@@ -1,5 +1,6 @@
 // Web Audio + speech helpers. unlockAudio() MUST be called inside a tap handler (iOS).
-import { pauseVoice } from './voice.js';
+// The mic stays on the whole time (voice.js); we never pause it for speech – every mic on/off
+// switch makes iOS reconfigure audio, which garbled beeps/speech and paused the camera.
 
 let ctx = null;
 
@@ -95,16 +96,13 @@ export function speak(text, { interrupt = false } = {}) {
   const token = ++speechToken;
   const synth = window.speechSynthesis;
 
-  // Half-duplex: turn the mic off first. If it was on, give iOS time to switch the audio
-  // session back to playback, otherwise the start of the sentence gets swallowed.
-  const wasListening = pauseVoice();
   const busy = synth.speaking || synth.pending;
   if (interrupt && busy) {
     synth.cancel();
     liveUtterances.clear();
   }
   // Chrome drops an utterance spoken right after cancel() → leave a small gap.
-  const delay = wasListening ? 450 : interrupt && busy ? 80 : 0;
+  const delay = interrupt && busy ? 80 : 0;
 
   // "Speaking" lasts until the LAST queued phrase ends (+ tail); the estimate is a fallback
   // in case onend never fires.
