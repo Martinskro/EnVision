@@ -3,6 +3,7 @@ import { unlockAudio, audioState, beep, speak } from './audio.js';
 import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vision.js';
 import { askMistral, snapshot } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
+import { colorHist, histSim } from './appearance.js';
 
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
@@ -166,7 +167,8 @@ async function requestWakeLock() {
 
 async function findBeer() {
   if (state.busy || !['detecting', 'guiding'].includes(state.phase)) return;
-  const picks = state.targets.map((t) => ({ ...t, box: { ...t.box } })); // freeze this frame's numbering
+  // Freeze this frame's numbering + colour fingerprints (the phone may move during the Mistral call).
+  const picks = state.targets.map((t) => ({ ...t, box: { ...t.box }, hist: colorHist(video, t.box) }));
   if (picks.length === 0) {
     speak("I can't see any bottles or cups. Point the phone at the table.");
     return;
@@ -234,6 +236,8 @@ function lockTarget(t, brand, source, count) {
     rank: t.n - 1, // left→right position among the green boxes when picked
     count, // how many green boxes there were when picked
     matchedN: t.n, // which green box is the beer in the current frame (drawn yellow instead)
+    hist: t.hist || colorHist(video, t.box), // colour fingerprint of the beer at pick time
+    sims: '',
   };
   resetGuidance();
   state.phase = 'guiding';
@@ -363,47 +367,50 @@ function handleArrival(now, handActive) {
 // The phone moves in Level 1, so follow the locked beer by matching it to this frame's detections.
 // If nothing matches (occluded / missed), keep the last known box.
 // The yellow box IS one of the green boxes: each detector frame, decide which green box is the beer.
-//  1. Same number of green boxes as when picked → same left→right rank. Robust to the phone moving,
-//     since the whole scene shifts together.
-//  2. Otherwise → the nearest green box of similar size.
-// No match → keep the last position (drawn dashed).
+// Score = looks like the beer (colour fingerprint from pick time) – distance from last position,
+// with small bonuses for "same left→right rank as at pick time" and "barely moved".
+// No acceptable match → keep the last position (drawn dashed).
+const MIN_SIM = 0.6; // colour similarity needed to accept a box that isn't right next to the last position
+
 function updateLock(now, handActive) {
   const lock = state.lock;
   lock.matchedN = null;
-  // Hand on/near the can: the detector can't see it properly and might match a decoy → hold.
+  // Hand on/near the can: the hand pollutes the box and colours → hold the last position.
   lock.held = !!(handActive && state.hand && isInside(state.hand.tip, expandBox(normBox(lock.box), HAND_NEAR_MARGIN)));
   if (lock.held) return;
 
   const diag = Math.hypot(video.videoWidth, video.videoHeight);
-  const dist = (t) => Math.hypot(cx(t.box) - cx(lock.box), cy(t.box) - cy(lock.box)) / diag;
   const lockArea = lock.box.width * lock.box.height;
-  const similarSize = (t) => {
-    const r = (t.box.width * t.box.height) / lockArea;
-    return r > 0.4 && r < 2.5;
-  };
+  const cands = state.targets;
+  const sameLayout = cands.length === lock.count;
 
   let best = null;
-  let how = '';
-  const cands = state.targets;
-  if (cands.length === lock.count && lock.count > 0) {
-    const t = cands[lock.rank];
-    if (t && dist(t) < 0.3) {
+  let bestScore = -Infinity;
+  let bestInfo = '';
+  const sims = [];
+  for (const t of cands) {
+    const d = Math.hypot(cx(t.box) - cx(lock.box), cy(t.box) - cy(lock.box)) / diag;
+    const r = (t.box.width * t.box.height) / lockArea;
+    const close = d < 0.08 && r > 0.4 && r < 2.5;
+    const sim = histSim(lock.hist, colorHist(video, t.box));
+    sims.push(`#${t.n}:${sim.toFixed(2)}`);
+    if (sim < MIN_SIM && !close) continue; // doesn't look like the beer and isn't where it was
+    let score = sim - 0.6 * d;
+    if (close) score += 0.2;
+    if (sameLayout && t.n - 1 === lock.rank) score += 0.15;
+    if (score > bestScore) {
+      bestScore = score;
       best = t;
-      how = 'rank';
+      bestInfo = `sim ${sim.toFixed(2)} d ${d.toFixed(2)}`;
     }
   }
-  if (!best) {
-    for (const t of cands) {
-      if (dist(t) < 0.2 && similarSize(t) && (!best || dist(t) < dist(best))) best = t;
-    }
-    how = 'nearest';
-  }
+  lock.sims = sims.join(' ');
 
   lock.seen = !!best;
   if (best) {
     lock.lastSeen = now;
     lock.matchedN = best.n;
-    lock.matched = `${how} #${best.n} ${best.label} ${best.score.toFixed(2)}`;
+    lock.matched = `#${best.n} ${best.label} (${bestInfo})`;
     lock.box = { originX: best.box.originX, originY: best.box.originY, width: best.box.width, height: best.box.height };
   }
 }
@@ -525,7 +532,8 @@ function draw() {
   const debugOn = !debugEl.classList.contains('hidden');
 
   for (const t of state.targets) {
-    if (state.lock && t.n === state.lock.matchedN) continue; // drawn yellow below
+    // The beer is drawn yellow below; also hide any green box sitting on it (e.g. while held).
+    if (state.lock && (t.n === state.lock.matchedN || iou(t.box, state.lock.box) > 0.3)) continue;
     drawBox(ctx, t, '#00e676', unit, { number: true, label: true });
   }
   if (debugOn) {
@@ -611,7 +619,7 @@ function renderDebug() {
     lock
       ? `lock: ${lock.source} ${lock.brand || ''} ${
           lock.held ? 'HELD (hand near)' : lock.seen ? `seen as ${lock.matched || '-'}` : `LOST ${((performance.now() - lock.lastSeen) / 1000).toFixed(1)}s`
-        }${params.has('freeze') ? ' [freeze]' : ''}`
+        }${params.has('freeze') ? ' [freeze]' : ''}\nsims: ${lock.sims || '—'}`
       : 'lock: —',
     gd
       ? `guide: dx=${gd.dx.toFixed(2)} dy=${gd.dy.toFixed(2)} f=${Math.round(gd.freq)}Hz every ${Math.round(gd.interval)}ms${gd.inside ? ' ON TARGET' : ''}`
