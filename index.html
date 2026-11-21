@@ -3,11 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>EnVision</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>Find My Beer</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <pre id="debug"></pre>
+    <button id="debugToggle" type="button">dbg</button>
+
+    <div id="startScreen">
+      <button id="startBtn" type="button">Start</button>
+      <p id="startMsg"></p>
+    </div>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
