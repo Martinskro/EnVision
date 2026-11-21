@@ -36,3 +36,22 @@ export function snapshot(video, drawBoxes, quality = 0.8) {
   if (drawBoxes) drawBoxes(g);
   return c.toDataURL('image/jpeg', quality);
 }
+
+// Close-up crop around a box (video pixels), expanded by `pad` box-sizes on each side,
+// so Mistral sees the hand + can instead of the whole table.
+export function snapshotCrop(video, box, pad = 1, maxSide = 768, quality = 0.85) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const x0 = Math.max(0, box.originX - box.width * pad);
+  const y0 = Math.max(0, box.originY - box.height * pad);
+  const x1 = Math.min(vw, box.originX + box.width * (1 + pad));
+  const y1 = Math.min(vh, box.originY + box.height * (1 + pad));
+  const w = x1 - x0;
+  const h = y1 - y0;
+  const scale = Math.min(1, maxSide / Math.max(w, h));
+  const c = document.createElement('canvas');
+  c.width = Math.round(w * scale);
+  c.height = Math.round(h * scale);
+  c.getContext('2d').drawImage(video, x0, y0, w, h, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', quality);
+}

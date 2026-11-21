@@ -68,3 +68,8 @@ export function speak(text) {
   u.rate = 1.05;
   window.speechSynthesis.speak(u);
 }
+
+// Short rising "success" arpeggio when the beer is confirmed in hand.
+export function success() {
+  [523, 659, 784, 1047].forEach((f, i) => beep({ freq: f, duration: 0.14, gain: 0.3, delay: i * 0.11 }));
+}

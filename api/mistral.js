@@ -1,5 +1,5 @@
 // Vercel serverless function: POST /api/mistral
-// Body: { task: "pick" | "confirm", image: "data:image/jpeg;base64,...", count?: number }
+// Body: { task: "pick" | "confirm" | "held", image: "data:image/jpeg;base64,...", count?: number }
 // The Mistral key lives only here (MISTRAL_API_KEY env var), never in client code.
 // Locally the same handler is served by the Vite dev plugin in vite.config.js.
 
@@ -15,6 +15,15 @@ function prompts(task, count) {
       'Which numbered object is the beer (a beer can or beer bottle)? Read the brand if visible.',
       'Reply with JSON only, exactly this shape:',
       '{"beer": <number or null if no beer>, "brand": "<brand name or null>", "reason": "<max 10 words>"}',
+    ].join('\n');
+  }
+  if (task === 'held') {
+    return [
+      'Close-up from a chest-mounted camera. A blind person is reaching for their beer on a table.',
+      'Is a hand holding, gripping or touching an object (a can, bottle or cup)? If yes, which object is it?',
+      'Reply with JSON only, exactly this shape:',
+      '{"holding": <true|false>, "object": "<short name or null>", "brand": "<brand or null>", "is_beer": <true|false>,',
+      ' "say": "<one short sentence to speak to the user, e.g. \\"You\'re holding a Tuborg. Cheers!\\" or \\"That\'s the water bottle, not your beer.\\">"}',
     ].join('\n');
   }
   // confirm
@@ -44,8 +53,8 @@ export default async function handler(req, res) {
   if (!key) return res.status(500).json({ ok: false, error: 'MISTRAL_API_KEY not set' });
 
   const { task, image, count } = req.body || {};
-  if (task !== 'pick' && task !== 'confirm') {
-    return res.status(400).json({ ok: false, error: 'task must be "pick" or "confirm"' });
+  if (!['pick', 'confirm', 'held'].includes(task)) {
+    return res.status(400).json({ ok: false, error: 'task must be "pick", "confirm" or "held"' });
   }
   if (typeof image !== 'string' || !image.startsWith('data:image/') || image.length > MAX_IMAGE_CHARS) {
     return res.status(400).json({ ok: false, error: 'image must be a data:image/... URL under 4 MB' });

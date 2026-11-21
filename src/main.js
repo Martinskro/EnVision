@@ -1,7 +1,7 @@
 import './style.css';
-import { unlockAudio, audioState, beep, speak } from './audio.js';
+import { unlockAudio, audioState, beep, speak, success } from './audio.js';
 import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vision.js';
-import { askMistral, snapshot } from './mistral.js';
+import { askMistral, snapshot, snapshotCrop } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
 import { colorHist, histSim } from './appearance.js';
 
@@ -9,7 +9,12 @@ import { colorHist, histSim } from './appearance.js';
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
 const MIN_DISPLAY_SCORE = 0.3; // numbered boxes; tracking also uses weaker detections
 const AUTO_CONFIRM_AFTER_MS = 1000; // phone mode: on target this long → ask Mistral "what is this?"
-const HAND_CONFIRM_AFTER_MS = 1500; // hand mode: fingertip on the beer this long → "You're holding a …"
+const GRAB_AFTER_MS = 700; // hand mode: hand on the beer this long → ask Mistral "is it held?"
+const GRAB_RECHECK_MS = 2500; // wait between "held?" checks if Mistral said not yet
+const GRAB_MAX_CHECKS = 4; // per lock – protects the credits
+const GRAB_BOX_MARGIN = 0.3; // hand landmarks within this margin of the box count as "on the beer"
+const GRAB_MIN_LANDMARKS = 4; // …and this many of the 21 landmarks must be there
+const HAND_KEEP_MS = 400; // keep the last hand this long when the tracker drops out (gripping occludes it)
 const HAND_BOX_MARGIN = 0.15; // fingertip touching the can's edge counts as inside
 const DETECT_EVERY = 3; // hand mode: object detector on every 3rd frame, hand tracker on the rest
 const HAND_NEAR_MARGIN = 0.5; // hand this close to the beer → hold the box (hand occludes the can)
@@ -28,7 +33,7 @@ const findBtn = $('findBtn');
 const handBtn = $('handBtn');
 
 const state = {
-  phase: 'idle', // idle | starting | detecting | asking | guiding | reloading | error
+  phase: 'idle', // idle | starting | detecting | asking | guiding | done | reloading | error
   delegate: '-',
   fps: 0,
   targets: [], // [{ n, label, score, box: {originX, originY, width, height} }] in video pixels
@@ -166,7 +171,7 @@ async function requestWakeLock() {
 // ---------- Level 1: pick the beer ----------
 
 async function findBeer() {
-  if (state.busy || !['detecting', 'guiding'].includes(state.phase)) return;
+  if (state.busy || !['detecting', 'guiding', 'done'].includes(state.phase)) return;
   // Freeze this frame's numbering + colour fingerprints (the phone may move during the Mistral call).
   const picks = state.targets.map((t) => ({ ...t, box: { ...t.box }, hist: colorHist(video, t.box) }));
   if (picks.length === 0) {
@@ -209,7 +214,7 @@ async function findBeer() {
 
 // Demo mode: skip Mistral, lock the biggest bottle (or biggest target if no bottle).
 function demoPick() {
-  if (state.busy || !['detecting', 'guiding'].includes(state.phase)) return;
+  if (state.busy || !['detecting', 'guiding', 'done'].includes(state.phase)) return;
   if (state.targets.length === 0) {
     speak("I can't see any bottles or cups.");
     return;
@@ -233,6 +238,9 @@ function lockTarget(t, brand, source, count) {
     lastSeen: performance.now(),
     insideSince: 0,
     confirmed: false,
+    grabChecks: 0,
+    lastGrabCheck: 0,
+    grab: '',
     rank: t.n - 1, // left→right position among the green boxes when picked
     count, // how many green boxes there were when picked
     matchedN: t.n, // which green box is the beer in the current frame (drawn yellow instead)
@@ -274,7 +282,7 @@ async function confirmObject() {
 function reset() {
   state.lock = null;
   state.guidance = null;
-  if (state.phase === 'guiding' || state.phase === 'asking') state.phase = 'detecting';
+  if (['guiding', 'asking', 'done'].includes(state.phase)) state.phase = 'detecting';
   speak('Reset');
 }
 
@@ -286,7 +294,7 @@ let lastDebugUpdate = 0;
 
 function loop(now) {
   requestAnimationFrame(loop);
-  if (!['detecting', 'asking', 'guiding'].includes(state.phase) || video.readyState < 2) return;
+  if (!['detecting', 'asking', 'guiding', 'done'].includes(state.phase) || video.readyState < 2) return;
   if (video.currentTime === lastVideoTime) return; // no new camera frame yet
   lastVideoTime = video.currentTime;
 
@@ -300,7 +308,7 @@ function loop(now) {
 
   if (!runDetector) {
     try {
-      processHand(hands.detectForVideo(video, now));
+      processHand(hands.detectForVideo(video, now), now);
     } catch (err) {
       console.error('hand detectForVideo failed', err);
       handleHandFailure();
@@ -352,15 +360,73 @@ function loop(now) {
 // Once the pointer has stayed on the beer for a moment, confirm with Mistral (once per lock).
 function handleArrival(now, handActive) {
   const lock = state.lock;
-  if (!state.guidance?.inside) {
+  // Phone mode: crosshair on the beer. Hand mode: fingertip on it, OR several hand landmarks on it
+  // (when gripping, the index fingertip is often hidden behind the can).
+  let onBeer = !!state.guidance?.inside;
+  if (handActive && state.hand) {
+    const zone = expandBox(normBox(lock.box), GRAB_BOX_MARGIN);
+    const n = state.hand.landmarks.filter((p) => isInside(p, zone)).length;
+    lock.grab = `${n}/21 landmarks on beer`;
+    onBeer = onBeer || n >= GRAB_MIN_LANDMARKS;
+  } else if (handActive) {
+    lock.grab = 'no hand';
+  }
+
+  if (!onBeer) {
     lock.insideSince = 0;
     return;
   }
   if (!lock.insideSince) lock.insideSince = now;
-  const wait = handActive ? HAND_CONFIRM_AFTER_MS : AUTO_CONFIRM_AFTER_MS;
-  if (!lock.confirmed && now - lock.insideSince > wait) {
-    lock.confirmed = true;
-    confirmObject();
+
+  if (!handActive) {
+    // Level 1: say once what we're pointing at.
+    if (!lock.confirmed && now - lock.insideSince > AUTO_CONFIRM_AFTER_MS) {
+      lock.confirmed = true;
+      confirmObject();
+    }
+    return;
+  }
+
+  // Level 2: hand on the beer for a moment → ask Mistral if it's actually held (close-up crop).
+  if (
+    now - lock.insideSince > GRAB_AFTER_MS &&
+    now - lock.lastGrabCheck > GRAB_RECHECK_MS &&
+    lock.grabChecks < GRAB_MAX_CHECKS &&
+    !state.busy
+  ) {
+    lock.lastGrabCheck = now;
+    lock.grabChecks++;
+    checkHeld();
+  }
+}
+
+async function checkHeld() {
+  const lock = state.lock;
+  state.busy = true;
+  try {
+    const res = await askMistral('held', snapshotCrop(video, lock.box, 1));
+    const r = res.result || {};
+    state.mistral = `held#${lock.grabChecks} → holding=${r.holding} ${r.object}/${r.brand} beer=${r.is_beer} (${res.clientMs}ms)`;
+    if (state.lock !== lock || state.phase !== 'guiding') return; // reset meanwhile
+    if (r.holding && r.is_beer) {
+      state.phase = 'done'; // stop guidance beeps
+      success();
+      setTimeout(() => speak(r.say || `You're holding ${lock.brand ? 'a ' + lock.brand : 'your beer'}. Cheers!`), 500);
+    } else if (r.holding) {
+      speak(r.say || "That's not your beer.");
+    }
+    // not holding yet → stay quiet, keep guiding; we re-check after GRAB_RECHECK_MS
+  } catch (err) {
+    console.error(err);
+    state.mistral = `held FAILED: ${err.message}`;
+    // Mistral down: trust the hand tracker so the demo still completes.
+    if (state.lock === lock && state.phase === 'guiding') {
+      state.phase = 'done';
+      success();
+      setTimeout(() => speak("You've got your beer."), 500);
+    }
+  } finally {
+    state.busy = false;
   }
 }
 
@@ -428,9 +494,13 @@ function iou(a, b) {
   return union > 0 ? inter / union : 0;
 }
 
-function processHand(result) {
+function processHand(result, now) {
   const lm = result.landmarks?.[0];
-  state.hand = lm ? { tip: { x: lm[8].x, y: lm[8].y }, landmarks: lm } : null; // 8 = index fingertip
+  if (lm) {
+    state.hand = { tip: { x: lm[8].x, y: lm[8].y }, landmarks: lm, seenAt: now }; // 8 = index fingertip
+  } else if (state.hand && now - state.hand.seenAt > HAND_KEEP_MS) {
+    state.hand = null; // only drop after a real gap – gripping the can briefly hides the hand
+  }
 }
 
 // Same idea as the detector: if GPU fails at inference time, rebuild on CPU once.
@@ -624,6 +694,7 @@ function renderDebug() {
     gd
       ? `guide: dx=${gd.dx.toFixed(2)} dy=${gd.dy.toFixed(2)} f=${Math.round(gd.freq)}Hz every ${Math.round(gd.interval)}ms${gd.inside ? ' ON TARGET' : ''}`
       : '',
+    lock && state.handMode ? `grab: ${lock.grab || '—'}  checks ${lock.grabChecks}/${GRAB_MAX_CHECKS}` : '',
     `hand: ${state.handMode ? 'ON' : 'off'} [${state.handDelegate}] ${
       state.hand ? `tip=(${state.hand.tip.x.toFixed(2)}, ${state.hand.tip.y.toFixed(2)})` : 'no hand'
     }`,
