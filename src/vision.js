@@ -22,8 +22,8 @@ export async function createObjectDetector({ forceCpu = false } = {}) {
       const detector = await ObjectDetector.createFromOptions(fs, {
         baseOptions: { modelAssetPath: DETECTOR_MODEL, delegate },
         runningMode: 'VIDEO',
-        scoreThreshold: 0.3,
-        maxResults: 10,
+        scoreThreshold: 0.2, // low on purpose: weak detections still help tracking; display filters at 0.3
+        maxResults: 15,
       });
       return { detector, delegate };
     } catch (err) {

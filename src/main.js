@@ -6,6 +6,7 @@ import { guide, resetGuidance } from './guidance.js';
 
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
+const MIN_DISPLAY_SCORE = 0.3; // numbered boxes; tracking also uses weaker detections
 const AUTO_CONFIRM_AFTER_MS = 1000; // on target this long → ask Mistral "what is this?"
 const params = new URLSearchParams(location.search);
 
@@ -26,6 +27,7 @@ const state = {
   fps: 0,
   targets: [], // [{ n, label, score, box: {originX, originY, width, height} }] in video pixels
   others: [],
+  all: [], // every detection ≥ 0.2, any label – used to keep tracking the locked beer
   lock: null, // { box, brand, source, seen, lastSeen, insideSince, confirmed }
   guidance: null,
   busy: false, // a Mistral call is in flight
@@ -282,13 +284,17 @@ function updateLock(now) {
   const lock = state.lock;
   const diag = Math.hypot(video.videoWidth, video.videoHeight);
   const lockArea = lock.box.width * lock.box.height;
+  // The longer we've lost it, the further we search (phone may have moved a lot meanwhile).
+  const lostSec = (now - lock.lastSeen) / 1000;
+  const radius = Math.min(0.35, 0.12 + 0.25 * lostSec);
   let best = null;
   let bestScore = 0;
-  for (const t of state.targets) {
+  // Search every detection (any label, score ≥ 0.2): the can's label/score flickers frame to frame.
+  for (const t of state.all) {
     const overlap = iou(lock.box, t.box);
     const centerDist = Math.hypot(cx(t.box) - cx(lock.box), cy(t.box) - cy(lock.box)) / diag;
     const areaRatio = (t.box.width * t.box.height) / lockArea;
-    const near = centerDist < 0.1 && areaRatio > 0.4 && areaRatio < 2.5;
+    const near = centerDist < radius && areaRatio > 0.33 && areaRatio < 3;
     const score = overlap > 0.2 ? overlap + 1 : near ? 1 - centerDist : 0;
     if (score > bestScore) {
       bestScore = score;
@@ -353,12 +359,16 @@ async function handleDetectorFailure(err) {
 function processDetections(detections) {
   const targets = [];
   const others = [];
+  const all = [];
   for (const d of detections) {
     const c = d.categories[0];
     if (!c) continue;
     const item = { label: c.categoryName, score: c.score, box: d.boundingBox };
+    all.push(item);
+    if (c.score < MIN_DISPLAY_SCORE) continue;
     (TARGET_LABELS.has(item.label) ? targets : others).push(item);
   }
+  state.all = all;
   // Number left → right so numbers are stable-ish and easy to say out loud.
   targets.sort((a, b) => cx(a.box) - cx(b.box));
   targets.forEach((t, i) => (t.n = i + 1));
