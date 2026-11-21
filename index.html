@@ -13,21 +13,35 @@
       <canvas id="overlay"></canvas>
     </div>
 
+    <div id="topbar">
+      <span id="brand">HELEN</span>
+      <span id="mic">○ mic off</span>
+      <button id="debugToggle" type="button">dbg</button>
+    </div>
     <pre id="debug"></pre>
-    <button id="debugToggle" type="button">dbg</button>
 
     <div id="controls" hidden>
-      <div class="row">
+      <div id="subs" aria-live="polite">
+        <p id="subYou"></p>
+        <p id="subHelen"></p>
+      </div>
+      <div class="row" id="devRow">
         <button id="demoBtn" type="button">Demo: biggest</button>
         <button id="confirmBtn" type="button">What is this?</button>
         <button id="resetBtn" type="button">Reset</button>
         <button id="handBtn" type="button">Hand: OFF</button>
       </div>
-      <button id="findBtn" type="button">Find my beer</button>
+      <button id="findBtn" type="button">
+        <span id="findMain">Tap anywhere or say “Hey Helen”</span>
+        <span id="findSub">“…where is my beer?”</span>
+      </button>
     </div>
 
     <div id="startScreen">
-      <button id="startBtn" type="button">Start</button>
+      <button id="startBtn" type="button" aria-label="Start Helen">
+        <span class="title">HELEN</span>
+        <span class="tap">Tap to start</span>
+      </button>
       <p id="startMsg"></p>
     </div>
 

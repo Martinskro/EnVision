@@ -1,10 +1,10 @@
 import './style.css';
-import { unlockAudio, audioState, beep, speak, success, isSpeaking } from './audio.js';
+import { unlockAudio, audioState, beep, speak, success, isSpeaking, onSpeak } from './audio.js';
 import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vision.js';
 import { askMistral, snapshot, snapshotCrop } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
 import { colorHist, histSim } from './appearance.js';
-import { startVoice, voiceState, voiceGate } from './voice.js';
+import { startVoice, voiceState, voiceGate, isListening } from './voice.js';
 
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
@@ -62,14 +62,34 @@ let cameraRecoveries = 0;
 // ---------- UI wiring ----------
 
 startBtn.addEventListener('click', start);
-$('debugToggle').addEventListener('click', () => debugEl.classList.toggle('hidden'));
+// Debug overlay + developer buttons: hidden by default (pitch UI), 'dbg' toggles them, ?debug shows at load.
+const setDebug = (on) => {
+  document.body.classList.toggle('nodebug', !on);
+  debugEl.classList.toggle('hidden', !on);
+};
+setDebug(params.has('debug'));
+$('debugToggle').addEventListener('click', () => setDebug(document.body.classList.contains('nodebug')));
 findBtn.addEventListener('click', findBeer);
+// "Tap anywhere": the camera area also starts a search, but only when idle (not while reaching).
+$('stage').addEventListener('click', () => {
+  if (['detecting', 'done'].includes(state.phase)) findBeer();
+});
 $('demoBtn').addEventListener('click', demoPick);
 $('confirmBtn').addEventListener('click', () => confirmObject());
 $('resetBtn').addEventListener('click', reset);
 handBtn.addEventListener('click', toggleHandMode);
 renderHandBtn();
-if (params.has('nodebug')) debugEl.classList.add('hidden');
+// Subtitles so the audience can follow what you said and what Helen says.
+const subYou = $('subYou');
+const subHelen = $('subHelen');
+const subTimers = new Map();
+function showSub(el, text) {
+  el.textContent = text;
+  el.classList.remove('faded');
+  clearTimeout(subTimers.get(el));
+  subTimers.set(el, setTimeout(() => el.classList.add('faded'), 9000));
+}
+onSpeak((text) => showSub(subHelen, text));
 // iOS pauses the camera <video> when the audio session changes (speech recognition) → resume at once.
 video.addEventListener('pause', () => {
   if (state.phase !== 'idle') video.play().catch(() => {});
@@ -90,6 +110,7 @@ async function start() {
         describe: describeTable,
         stop: reset,
         wake: () => speak('Yes?'),
+        heard: (text) => showSub(subYou, `“${text.charAt(0).toUpperCase() + text.slice(1)}”`),
       },
       isSpeaking,
     );
@@ -158,9 +179,9 @@ async function loadHands(forceCpu = params.has('cpu')) {
 
 function loadHandMode() {
   try {
-    return localStorage.getItem('handMode') === '1';
+    return localStorage.getItem('handMode') !== '0'; // hand mode (Level 2) is the default
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -424,6 +445,7 @@ function loop(now) {
   if (now - lastDebugUpdate > 200) {
     lastDebugUpdate = now;
     renderDebug();
+    renderStatus();
   }
 }
 
@@ -742,6 +764,33 @@ function drawBox(g, item, color, unit, { number, label }) {
     g.textAlign = 'start';
     g.textBaseline = 'alphabetic';
   }
+}
+
+// ---------- Pitch UI status ----------
+
+const findMain = $('findMain');
+const findSub = $('findSub');
+const micEl = $('mic');
+
+function renderStatus() {
+  const [main, sub] = {
+    detecting: ['Tap anywhere or say “Hey Helen”', '“…where is my beer?”'],
+    asking: ['Looking for your beer…', 'Asking Mistral'],
+    guiding: state.handMode
+      ? ['Reach out and follow the beeps', 'Faster = closer · chirp = grab it']
+      : ['Follow the beeps', 'Faster = closer'],
+    done: ['Cheers! You have your beer', 'Tap or say “Hey Helen” to go again'],
+  }[state.phase] || ['Helen', ''];
+  if (findMain.textContent !== main) findMain.textContent = main;
+  if (findSub.textContent !== sub) findSub.textContent = sub;
+
+  const on = isListening() && voiceState.status !== 'paused';
+  micEl.textContent = !voiceState.status || voiceState.status === 'unsupported' || params.has('novoice')
+    ? ''
+    : on
+      ? '● listening'
+      : '○ mic off';
+  micEl.classList.toggle('on', on);
 }
 
 // ---------- Debug overlay ----------

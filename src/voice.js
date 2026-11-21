@@ -174,6 +174,7 @@ function fire(intent, now, text) {
   voiceState.status = 'listening';
   voiceState.lastIntent = `${intent} ← "${text}"`;
   voiceState.why = `fired: ${intent}`;
+  handlers.heard?.(text);
   // No rec.abort()/restart here: on iOS that reconfigures audio and pauses the camera video.
   // Already-used results are skipped via `consumed` instead.
   handlers[intent]?.();

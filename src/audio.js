@@ -74,11 +74,18 @@ export function vibrate(ms) {
 // isSpeaking() uses our own timer instead of speechSynthesis.speaking, which can get stuck on
 // true (seen with the mic active) – that silently blocked voice commands and guidance beeps.
 let speakingUntil = 0;
+let speakListener = null;
+
+// Subtitles: main.js registers a listener that shows what Helen says.
+export function onSpeak(fn) {
+  speakListener = fn;
+}
 
 export function speak(text) {
   if (!('speechSynthesis' in window)) return;
   // Half-duplex: turn the mic off first. If it was on, give iOS a moment to switch the
   // audio session back to playback before talking.
+  speakListener?.(text);
   const wasListening = pauseVoice();
   const delay = wasListening ? 300 : 0;
   // Upper bound for how long this takes to say; cleared early when the utterance really ends.
