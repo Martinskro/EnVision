@@ -511,6 +511,9 @@ function loop(now) {
     }
   }
 
+  // After a successful grab, keep following the beer (now in the hand) so the yellow box stays on it.
+  if (state.phase === 'done' && state.lock && runDetector) updateLock(now, false);
+
   if (state.phase === 'guiding' && state.lock) {
     if (runDetector && !(handActive && params.has('freeze'))) updateLock(now, handActive);
     const silent = isSpeaking();
