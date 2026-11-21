@@ -20,13 +20,17 @@ export function audioState() {
   return ctx ? ctx.state : 'none';
 }
 
-// Short sine beep. pan: -1 (left) .. 1 (right).
-export function beep({ freq = 880, duration = 0.08, pan = 0, gain = 0.3 } = {}) {
-  if (!ctx || ctx.state !== 'running') return;
-  const t = ctx.currentTime;
+// Short sine beep. pan: -1 (left) .. 1 (right). delay: seconds from now.
+export function beep({ freq = 880, duration = 0.08, pan = 0, gain = 0.3, delay = 0, type = 'sine' } = {}) {
+  if (!ctx) return;
+  if (ctx.state !== 'running') {
+    ctx.resume(); // iOS can suspend after interruptions (calls, Siri, lock screen)
+    return;
+  }
+  const t = ctx.currentTime + delay;
   const osc = ctx.createOscillator();
   const g = ctx.createGain();
-  osc.type = 'sine';
+  osc.type = type;
   osc.frequency.value = freq;
   g.gain.setValueAtTime(0.0001, t);
   g.gain.exponentialRampToValueAtTime(gain, t + 0.01);
@@ -43,6 +47,15 @@ export function beep({ freq = 880, duration = 0.08, pan = 0, gain = 0.3 } = {}) 
   out.connect(ctx.destination);
   osc.start(t);
   osc.stop(t + duration + 0.02);
+}
+
+// Android only – iOS Safari has no vibration API.
+export function vibrate(ms) {
+  try {
+    navigator.vibrate?.(ms);
+  } catch {
+    /* ignore */
+  }
 }
 
 // iOS only allows speechSynthesis after a first speak() inside a user gesture,

@@ -102,3 +102,47 @@ body {
   font-size: 18px;
   text-align: center;
 }
+
+#controls {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0));
+}
+
+#controls[hidden] {
+  display: none;
+}
+
+#controls .row {
+  display: flex;
+  gap: 8px;
+}
+
+#controls button {
+  flex: 1;
+  border: none;
+  border-radius: 12px;
+  font-weight: 700;
+  color: #000;
+}
+
+#controls .row button {
+  padding: 12px 4px;
+  font-size: 14px;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+#findBtn {
+  height: 22vh;
+  font-size: 9vmin;
+  background: #f5b800;
+}
+
+#findBtn:disabled {
+  opacity: 0.6;
+}
