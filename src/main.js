@@ -1,13 +1,15 @@
 import './style.css';
 import { unlockAudio, audioState, beep, speak } from './audio.js';
-import { createObjectDetector } from './vision.js';
+import { createObjectDetector, createHandLandmarker } from './vision.js';
 import { askMistral, snapshot } from './mistral.js';
-import { guide, resetGuidance } from './guidance.js';
+import { guide, noPointerTick, resetGuidance } from './guidance.js';
 
 // COCO labels EfficientDet-Lite0 uses for our objects (a can usually shows up as "bottle" or "cup").
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
 const MIN_DISPLAY_SCORE = 0.3; // numbered boxes; tracking also uses weaker detections
-const AUTO_CONFIRM_AFTER_MS = 1000; // on target this long → ask Mistral "what is this?"
+const AUTO_CONFIRM_AFTER_MS = 1000; // phone mode: on target this long → ask Mistral "what is this?"
+const HAND_CONFIRM_AFTER_MS = 1500; // hand mode: fingertip on the beer this long → "You're holding a …"
+const HAND_BOX_MARGIN = 0.15; // fingertip touching the can's edge counts as inside
 const params = new URLSearchParams(location.search);
 
 const $ = (id) => document.getElementById(id);
@@ -20,6 +22,7 @@ const startBtn = $('startBtn');
 const startMsg = $('startMsg');
 const controls = $('controls');
 const findBtn = $('findBtn');
+const handBtn = $('handBtn');
 
 const state = {
   phase: 'idle', // idle | starting | detecting | asking | guiding | reloading | error
@@ -30,12 +33,16 @@ const state = {
   all: [], // every detection ≥ 0.2, any label – used to keep tracking the locked beer
   lock: null, // { box, brand, source, seen, lastSeen, insideSince, confirmed }
   guidance: null,
+  handMode: loadHandMode(), // Level 2: guide the fingertip (phone static) instead of the phone
+  handDelegate: '-',
+  hand: null, // { tip: {x, y} normalized, landmarks } or null when no hand visible
   busy: false, // a Mistral call is in flight
   mistral: '—', // last Mistral status line for debug
   error: '',
 };
 
 let detector = null;
+let hands = null; // HandLandmarker, loaded in the background after Start
 let lastVideoTime = -1;
 
 // ---------- UI wiring ----------
@@ -46,6 +53,8 @@ findBtn.addEventListener('click', findBeer);
 $('demoBtn').addEventListener('click', demoPick);
 $('confirmBtn').addEventListener('click', () => confirmObject());
 $('resetBtn').addEventListener('click', reset);
+handBtn.addEventListener('click', toggleHandMode);
+renderHandBtn();
 if (params.has('nodebug')) debugEl.classList.add('hidden');
 
 // ---------- Start ----------
@@ -73,6 +82,7 @@ async function start() {
     controls.hidden = false;
     state.phase = 'detecting';
     requestAnimationFrame(loop);
+    loadHands(); // background – Level 1 works while this loads
   } catch (err) {
     console.error(err);
     state.phase = 'error';
@@ -100,6 +110,45 @@ async function startCamera() {
     await new Promise((r) => video.addEventListener('loadeddata', r, { once: true }));
   }
   syncCanvasSize();
+}
+
+async function loadHands(forceCpu = params.has('cpu')) {
+  if (hands) return;
+  state.handDelegate = 'loading…';
+  try {
+    const res = await createHandLandmarker({ forceCpu });
+    hands = res.hands;
+    state.handDelegate = res.delegate + (forceCpu && !params.has('cpu') ? ' (fallback)' : '');
+  } catch (err) {
+    console.error('HandLandmarker failed', err);
+    state.handDelegate = 'FAILED: ' + (err?.message || err);
+  }
+}
+
+function loadHandMode() {
+  try {
+    return localStorage.getItem('handMode') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function toggleHandMode() {
+  state.handMode = !state.handMode;
+  try {
+    localStorage.setItem('handMode', state.handMode ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+  state.hand = null;
+  resetGuidance();
+  renderHandBtn();
+  speak(state.handMode ? 'Hand mode' : 'Phone mode');
+}
+
+function renderHandBtn() {
+  handBtn.textContent = state.handMode ? 'Hand: ON' : 'Hand: OFF';
+  handBtn.classList.toggle('on', state.handMode);
 }
 
 async function requestWakeLock() {
@@ -183,7 +232,8 @@ function lockTarget(t, brand, source) {
   resetGuidance();
   state.phase = 'guiding';
   const what = state.lock.brand ? `a ${state.lock.brand}` : 'the beer';
-  speak(`Found ${what}, ${direction(state.lock.box)}. Follow the beeps.`);
+  const how = state.handMode ? 'Reach out your hand and follow the beeps.' : 'Follow the beeps.';
+  speak(`Found ${what}, ${direction(state.lock.box)}. ${how}`);
 }
 
 function direction(box) {
@@ -232,22 +282,45 @@ function loop(now) {
 
   syncCanvasSize();
 
-  let result;
-  try {
-    result = detector.detectForVideo(video, now);
-  } catch (err) {
-    console.error('detectForVideo failed', err);
-    handleDetectorFailure(err);
-    return;
+  // Hand mode + beer locked: the phone is static and the box is frozen, so only the hand
+  // tracker runs (no need to share frames with the object detector).
+  const handActive = state.phase === 'guiding' && state.handMode && !!hands;
+
+  if (handActive) {
+    try {
+      processHand(hands.detectForVideo(video, now));
+    } catch (err) {
+      console.error('hand detectForVideo failed', err);
+      handleHandFailure();
+      return;
+    }
+  } else {
+    let result;
+    try {
+      result = detector.detectForVideo(video, now);
+    } catch (err) {
+      console.error('detectForVideo failed', err);
+      handleDetectorFailure(err);
+      return;
+    }
+    processDetections(result.detections);
+    state.hand = null;
   }
 
-  processDetections(result.detections);
-
   if (state.phase === 'guiding' && state.lock) {
-    updateLock(now);
-    const speaking = window.speechSynthesis?.speaking;
-    state.guidance = guide(now, { x: 0.5, y: 0.5 }, normBox(state.lock.box), { silent: speaking });
-    handleArrival(now);
+    const silent = !!window.speechSynthesis?.speaking;
+    if (handActive) {
+      if (state.hand) {
+        state.guidance = guide(now, state.hand.tip, expandBox(normBox(state.lock.box), HAND_BOX_MARGIN), { silent });
+      } else {
+        state.guidance = null;
+        noPointerTick(now, { silent });
+      }
+    } else {
+      updateLock(now);
+      state.guidance = guide(now, { x: 0.5, y: 0.5 }, normBox(state.lock.box), { silent });
+    }
+    handleArrival(now, handActive);
   }
 
   draw();
@@ -265,14 +338,15 @@ function loop(now) {
 }
 
 // Once the pointer has stayed on the beer for a moment, confirm with Mistral (once per lock).
-function handleArrival(now) {
+function handleArrival(now, handActive) {
   const lock = state.lock;
   if (!state.guidance?.inside) {
     lock.insideSince = 0;
     return;
   }
   if (!lock.insideSince) lock.insideSince = now;
-  if (!lock.confirmed && now - lock.insideSince > AUTO_CONFIRM_AFTER_MS) {
+  const wait = handActive ? HAND_CONFIRM_AFTER_MS : AUTO_CONFIRM_AFTER_MS;
+  if (!lock.confirmed && now - lock.insideSince > wait) {
     lock.confirmed = true;
     confirmObject();
   }
@@ -320,6 +394,35 @@ function iou(a, b) {
   const inter = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
   const union = a.width * a.height + b.width * b.height - inter;
   return union > 0 ? inter / union : 0;
+}
+
+function processHand(result) {
+  const lm = result.landmarks?.[0];
+  state.hand = lm ? { tip: { x: lm[8].x, y: lm[8].y }, landmarks: lm } : null; // 8 = index fingertip
+}
+
+// Same idea as the detector: if GPU fails at inference time, rebuild on CPU once.
+let handFailedOnce = false;
+async function handleHandFailure() {
+  const old = hands;
+  hands = null; // loop falls back to phone-mode guidance meanwhile
+  try {
+    old?.close();
+  } catch {
+    /* ignore */
+  }
+  if (handFailedOnce) {
+    state.handDelegate = 'FAILED twice – hand mode unavailable';
+    return;
+  }
+  handFailedOnce = true;
+  await loadHands(true);
+}
+
+function expandBox(b, f) {
+  const mx = (b.x1 - b.x0) * f;
+  const my = (b.y1 - b.y0) * f;
+  return { x0: b.x0 - mx, y0: b.y0 - my, x1: b.x1 + mx, y1: b.y1 + my };
 }
 
 function normBox(b) {
@@ -404,7 +507,21 @@ function draw() {
     ctx.setLineDash([]);
   }
 
-  if (state.phase === 'guiding') {
+  if (state.hand) {
+    const inside = state.guidance?.inside;
+    ctx.fillStyle = 'rgba(0, 200, 255, 0.8)';
+    for (const p of state.hand.landmarks) {
+      ctx.beginPath();
+      ctx.arc(p.x * canvas.width, p.y * canvas.height, unit * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = inside ? '#ffd600' : '#00c8ff';
+    ctx.beginPath();
+    ctx.arc(state.hand.tip.x * canvas.width, state.hand.tip.y * canvas.height, unit * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (state.phase === 'guiding' && !(state.handMode && hands)) {
     // Crosshair = where the phone is pointing (Level 1 pointer).
     const x = canvas.width / 2;
     const y = canvas.height / 2;
@@ -465,6 +582,9 @@ function renderDebug() {
     gd
       ? `guide: dx=${gd.dx.toFixed(2)} dy=${gd.dy.toFixed(2)} f=${Math.round(gd.freq)}Hz every ${Math.round(gd.interval)}ms${gd.inside ? ' ON TARGET' : ''}`
       : '',
+    `hand: ${state.handMode ? 'ON' : 'off'} [${state.handDelegate}] ${
+      state.hand ? `tip=(${state.hand.tip.x.toFixed(2)}, ${state.hand.tip.y.toFixed(2)})` : 'no hand'
+    }`,
     `mistral: ${state.mistral}`,
     state.error ? `ERROR: ${state.error}` : '',
   ]

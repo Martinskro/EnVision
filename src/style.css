@@ -146,3 +146,7 @@ body {
 #findBtn:disabled {
   opacity: 0.6;
 }
+
+#controls .row button.on {
+  background: #00c8ff;
+}

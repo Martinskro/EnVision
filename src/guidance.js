@@ -61,3 +61,11 @@ export function guide(now, pointer, box, { silent = false } = {}) {
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
+
+// No pointer visible (e.g. no hand in view): slow, soft, centered low tick so the user
+// knows the app is alive and waiting for their hand.
+export function noPointerTick(now, { silent = false } = {}) {
+  if (silent || now - lastBeep < 1200) return;
+  lastBeep = now;
+  beep({ freq: 300, duration: 0.05, gain: 0.15 });
+}
