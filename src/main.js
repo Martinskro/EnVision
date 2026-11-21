@@ -90,7 +90,12 @@ const setDebug = (on) => {
 };
 setDebug(params.has('debug'));
 $('debugToggle').addEventListener('click', () => setDebug(document.body.classList.contains('nodebug')));
-findBtn.addEventListener('click', findBeer);
+// Big button: after the beer was found (done) it RESETS and restarts the mount countdown;
+// otherwise it searches.
+findBtn.addEventListener('click', () => {
+  if (state.phase === 'done') reset();
+  else findBeer();
+});
 // Bluetooth keyboard / presentation clicker paired with the phone: hands-free trigger.
 // Esc / Backspace = reset; any other key = find my beer (when not already busy guiding).
 document.addEventListener('keydown', (e) => {
@@ -426,8 +431,14 @@ async function describeTable() {
 function reset() {
   state.lock = null;
   state.guidance = null;
+  state.hand = null;
   if (['guiding', 'asking', 'done'].includes(state.phase)) state.phase = 'detecting';
-  speak('Reset', { interrupt: true });
+  // Re-arm the hands-free countdown so there's time to re-mount the phone.
+  autoArmed = AUTO_ON;
+  autoAt = 0;
+  autoTries = 0;
+  autoLastBeepSec = 0;
+  speak(AUTO_ON ? `Reset. I'll look again in ${Math.round(AUTO_DELAY_MS / 1000)} seconds.` : 'Reset', { interrupt: true });
 }
 
 // ---------- Main loop ----------
@@ -882,7 +893,7 @@ function renderStatus() {
     guiding: state.handMode
       ? ['Reach out and follow the beeps', 'Faster = closer · chirp = grab it']
       : ['Follow the beeps', 'Faster = closer'],
-    done: ['Cheers! You have your beer', VOICE_ON ? 'Tap or say “Hey Helen” to go again' : 'Tap or press a key to go again'],
+    done: ['Cheers! You have your beer', 'Tap here to reset'],
   }[state.phase] || ['Helen', ''];
   let [m, sb] = [main, sub];
   if (autoArmed && state.phase === 'detecting' && autoAt) {
