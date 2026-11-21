@@ -1,4 +1,5 @@
 // Web Audio + speech helpers. unlockAudio() MUST be called inside a tap handler (iOS).
+import { pauseVoice } from './voice.js';
 
 let ctx = null;
 
@@ -67,16 +68,24 @@ let speakingUntil = 0;
 
 export function speak(text) {
   if (!('speechSynthesis' in window)) return;
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'en-US';
-  u.rate = 1.05;
+  // Half-duplex: turn the mic off first. If it was on, give iOS a moment to switch the
+  // audio session back to playback before talking.
+  const wasListening = pauseVoice();
+  const delay = wasListening ? 300 : 0;
   // Upper bound for how long this takes to say; cleared early when the utterance really ends.
-  speakingUntil = performance.now() + Math.min(8000, 800 + text.length * 75);
-  u.onend = u.onerror = () => {
-    speakingUntil = 0;
+  speakingUntil = performance.now() + delay + Math.min(8000, 800 + text.length * 75);
+  const say = () => {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'en-US';
+    u.rate = 1.05;
+    u.onend = u.onerror = () => {
+      speakingUntil = 0;
+    };
+    window.speechSynthesis.speak(u);
   };
-  window.speechSynthesis.speak(u);
+  if (delay) setTimeout(say, delay);
+  else say(); // keep synchronous when possible (first speak must be inside the Start tap on iOS)
 }
 
 export function isSpeaking() {

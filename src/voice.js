@@ -29,6 +29,8 @@ export const voiceState = {
 
 let rec = null;
 let enabled = false;
+let paused = false; // half-duplex: mic off while Helen speaks / while guiding
+let gateOpenSince = 0;
 let armedUntil = 0;
 let lastFire = 0;
 let handlers = {};
@@ -70,8 +72,8 @@ export function startVoice(onIntent, speaking) {
   };
   rec.onend = () => {
     // iOS/Chrome end the session after silence or errors → restart while enabled.
-    if (enabled) setTimeout(safeStart, 250);
-    else voiceState.status = 'off';
+    if (enabled && !paused) setTimeout(safeStart, 250);
+    else voiceState.status = paused ? 'paused' : 'off';
   };
   safeStart();
 }
@@ -85,8 +87,44 @@ export function stopVoice() {
   }
 }
 
-function safeStart() {
+// Mic off now (called right before Helen speaks, and while guiding). On iOS an active mic
+// makes speech output quiet / cut off / routed to the earpiece.
+export function pauseVoice() {
+  gateOpenSince = 0;
+  if (!enabled || paused) return false;
+  paused = true;
+  voiceState.status = 'paused';
+  try {
+    rec.abort();
+  } catch {
+    /* ignore */
+  }
+  return true; // was listening
+}
+
+export function isListening() {
+  return enabled && !paused;
+}
+
+// Called every frame: open = OK to listen now. Resumes only after it has been open for a moment,
+// so back-to-back phrases don't toggle the mic (each toggle can pause the camera on iOS).
+export function voiceGate(open, now) {
   if (!enabled) return;
+  if (!open) {
+    if (!paused) pauseVoice();
+    gateOpenSince = 0;
+    return;
+  }
+  if (!paused) return;
+  if (!gateOpenSince) gateOpenSince = now;
+  if (now - gateOpenSince > 600) {
+    paused = false;
+    safeStart();
+  }
+}
+
+function safeStart() {
+  if (!enabled || paused) return;
   try {
     rec.start();
     consumed = 0; // new session → result indices start from 0 again
