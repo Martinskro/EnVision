@@ -29,13 +29,18 @@ const DETECT_EVERY = 3; // hand mode: object detector on every 3rd frame, hand t
 const HAND_NEAR_MARGIN = 0.5; // hand this close to the beer → hold the box (hand occludes the can)
 // Voice commands are opt-in (?voice): the always-on mic made iOS audio unreliable.
 const VOICE_ON = params.has('voice');
-// Hands-free for the chest mount (?auto): once a can/bottle has been in view for AUTO_STABLE_MS,
-// Helen starts the search by herself. Once per Start – after a grab the beer is in your hand, so
-// re-searching would lock a decoy. Restart with a key (Bluetooth keyboard/clicker) or a tap.
-const AUTO_ON = params.has('auto');
-const AUTO_STABLE_MS = 2000;
+// Hands-free for the chest mount: the search starts AUTO_DELAY_MS after Start, giving time to
+// mount the phone (countdown on screen, beeps for the last 3 s). If nothing is in view yet it retries.
+// Once per Start – after a grab the beer is in your hand, so re-searching would lock a decoy.
+// ?delay=15 changes the wait, ?noauto disables it. A key or tap searches immediately.
+const AUTO_ON = !params.has('noauto');
+const AUTO_DELAY_MS = (Number(params.get('delay')) || 10) * 1000;
+const AUTO_RETRY_MS = 4000;
+const AUTO_MAX_TRIES = 5;
 let autoArmed = AUTO_ON;
-let autoSince = 0;
+let autoAt = 0; // when the auto search fires
+let autoTries = 0;
+let autoLastBeepSec = 0;
 
 const $ = (id) => document.getElementById(id);
 const video = $('video');
@@ -185,7 +190,7 @@ async function greetWhenReady() {
   const canTalk = voiceOn && isListening();
   speak(
     AUTO_ON
-      ? "Hi, I'm Helen. Point me at the table and I'll find your beer."
+      ? `Hi, I'm Helen. Mount the phone, I'll look for your beer in ${Math.round(AUTO_DELAY_MS / 1000)} seconds.`
       : canTalk
         ? "Hi, I'm Helen. Ask me where your beer is."
         : "Hi, I'm Helen. Tap the bottom of the screen to find your beer.",
@@ -283,6 +288,7 @@ async function requestWakeLock() {
 
 async function findBeer() {
   if (state.busy || !['detecting', 'guiding', 'done'].includes(state.phase)) return;
+  autoArmed = false; // a manual search (key/tap) replaces the countdown
   // Freeze this frame's numbering + colour fingerprints (the phone may move during the Mistral call).
   const picks = state.targets.map((t) => ({ ...t, box: { ...t.box }, hist: colorHist(video, t.box) }));
   if (picks.length === 0) {
@@ -472,15 +478,25 @@ function loop(now) {
     if (!handActive) state.hand = null; // keep the last hand between alternating frames
   }
 
-  // Auto mode: a can/bottle steadily in view → start the search hands-free (once per Start).
-  if (autoArmed && state.phase === 'detecting' && !state.busy && !isSpeaking()) {
-    const drink = state.targets.some((t) => t.label === 'bottle' || t.label === 'cup');
-    if (!drink) autoSince = 0;
-    else if (!autoSince) autoSince = now;
-    else if (now - autoSince > AUTO_STABLE_MS) {
-      autoArmed = false;
-      autoSince = 0;
-      findBeer();
+  // Auto search after the mount countdown (once per Start).
+  if (autoArmed && state.phase === 'detecting' && !state.busy) {
+    if (!autoAt) autoAt = now + AUTO_DELAY_MS;
+    const left = autoAt - now;
+    const sec = Math.ceil(left / 1000);
+    if (sec <= 3 && sec >= 1 && sec !== autoLastBeepSec) {
+      autoLastBeepSec = sec;
+      beep({ freq: 520, duration: 0.09, gain: 0.25 }); // 3-2-1 countdown beeps
+    }
+    if (left <= 0) {
+      autoTries++;
+      autoLastBeepSec = 0;
+      if (state.targets.length > 0 || autoTries >= AUTO_MAX_TRIES) {
+        autoArmed = false;
+        findBeer(); // also says "I can't see any bottles…" if there really is nothing
+      } else {
+        speak("I can't see a bottle yet. Point me at the table.");
+        autoAt = now + AUTO_RETRY_MS;
+      }
     }
   }
 
@@ -861,16 +877,24 @@ const micEl = $('mic');
 
 function renderStatus() {
   const [main, sub] = {
-    detecting: ['Tap anywhere or say “Hey Helen”', '“…where is my beer?”'],
+    detecting: VOICE_ON ? ['Tap anywhere or say “Hey Helen”', '“…where is my beer?”'] : ['Tap to find your beer', 'or press any key'],
     asking: ['Looking for your beer…', 'Asking Mistral'],
     guiding: state.handMode
       ? ['Reach out and follow the beeps', 'Faster = closer · chirp = grab it']
       : ['Follow the beeps', 'Faster = closer'],
-    done: ['Cheers! You have your beer', 'Tap or say “Hey Helen” to go again'],
+    done: ['Cheers! You have your beer', VOICE_ON ? 'Tap or say “Hey Helen” to go again' : 'Tap or press a key to go again'],
   }[state.phase] || ['Helen', ''];
-  if (findMain.textContent !== main) findMain.textContent = main;
-  if (findSub.textContent !== sub) findSub.textContent = sub;
+  let [m, sb] = [main, sub];
+  if (autoArmed && state.phase === 'detecting' && autoAt) {
+    m = `Searching in ${Math.max(0, Math.ceil((autoAt - performance.now()) / 1000))}…`;
+    sb = 'Mount the phone facing the table';
+  }
+  if (findMain.textContent !== m) findMain.textContent = m;
+  if (findSub.textContent !== sb) findSub.textContent = sb;
+  return renderMic();
+}
 
+function renderMic() {
   const on = isListening() && voiceState.status !== 'paused';
   micEl.textContent = !voiceState.status || voiceState.status === 'unsupported' || !VOICE_ON
     ? ''
@@ -907,7 +931,7 @@ function renderDebug() {
     `voice: ${voiceState.status}  heard: "${voiceState.heard}"\n  why: ${voiceState.why || '—'}${
       voiceState.lastIntent ? `\n  last: ${voiceState.lastIntent}` : ''
     }`,
-    AUTO_ON ? `auto: ${autoArmed ? (autoSince ? `starting in ${Math.max(0, (AUTO_STABLE_MS - (performance.now() - autoSince)) / 1000).toFixed(1)}s` : 'waiting for a can/bottle') : 'used (key/tap to search again)'}` : '',
+    AUTO_ON ? `auto: ${autoArmed ? `search in ${autoAt ? ((autoAt - performance.now()) / 1000).toFixed(1) : '…'}s (try ${autoTries + 1}/${AUTO_MAX_TRIES})` : 'used (key/tap to search again)'}` : '',
     `mistral: ${state.mistral}`,
     state.error ? `ERROR: ${state.error}` : '',
   ]
