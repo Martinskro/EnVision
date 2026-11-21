@@ -10,9 +10,9 @@ import { startVoice, voiceState, isListening, voiceReady } from './voice.js';
 const TARGET_LABELS = new Set(['bottle', 'cup', 'wine glass']);
 const MIN_DISPLAY_SCORE = 0.3; // numbered boxes; tracking also uses weaker detections
 const AUTO_CONFIRM_AFTER_MS = 1000; // phone mode: on target this long → ask Mistral "what is this?"
-const GRAB_AFTER_MS = 700; // hand mode: hand on the beer this long → ask Mistral "is it held?"
-const GRAB_RECHECK_MS = 2500; // wait between "held?" checks if Mistral said not yet
-const GRAB_MAX_CHECKS = 4; // per lock – protects the credits
+const GRAB_AFTER_MS = 1000; // hand mode: hand on the beer this long → grabbed (local decision)
+const GRAB_GRACE_MS = 700; // hand may drop out / slip off this long without restarting the timer
+const GRAB_MAX_CHECKS = 4; // Mistral double-checks per lock – protects the credits
 const GRAB_BOX_MARGIN = 0.3; // hand landmarks within this margin of the box count as "on the beer"
 const GRAB_MIN_LANDMARKS = 4; // …and this many of the 21 landmarks must be there
 const HAND_KEEP_MS = 400; // keep the last hand this long when the tracker drops out (gripping occludes it)
@@ -323,7 +323,7 @@ function lockTarget(t, kind, source, count) {
     insideSince: 0,
     confirmed: false,
     grabChecks: 0,
-    lastGrabCheck: 0,
+    lastOnBeerAt: 0,
     grab: '',
     rank: t.n - 1, // left→right position among the green boxes when picked
     count, // how many green boxes there were when picked
@@ -474,73 +474,68 @@ function handleArrival(now, handActive) {
   // Phone mode: crosshair on the beer. Hand mode: fingertip on it, OR several hand landmarks on it
   // (when gripping, the index fingertip is often hidden behind the can).
   let onBeer = !!state.guidance?.inside;
+  let n = 0;
   if (handActive && state.hand) {
     const zone = expandBox(normBox(lock.box), GRAB_BOX_MARGIN);
-    const n = state.hand.landmarks.filter((p) => isInside(p, zone)).length;
-    lock.grab = `${n}/21 landmarks on beer`;
+    n = state.hand.landmarks.filter((p) => isInside(p, zone)).length;
     onBeer = onBeer || n >= GRAB_MIN_LANDMARKS;
-  } else if (handActive) {
-    lock.grab = 'no hand';
   }
 
-  if (!onBeer) {
-    lock.insideSince = 0;
-    return;
+  if (onBeer) {
+    lock.lastOnBeerAt = now;
+    if (!lock.insideSince) lock.insideSince = now;
+  } else if (!lock.lastOnBeerAt || now - lock.lastOnBeerAt > GRAB_GRACE_MS) {
+    lock.insideSince = 0; // only restart after a real gap – gripping hides the hand for moments
   }
-  if (!lock.insideSince) lock.insideSince = now;
+  const held = lock.insideSince ? now - lock.insideSince : 0;
+  lock.grab = handActive
+    ? `${state.hand ? `${n}/21 on beer` : 'no hand'}  on-beer ${(held / 1000).toFixed(1)}s / ${GRAB_AFTER_MS / 1000}s`
+    : '';
+  if (!lock.insideSince) return;
 
   if (!handActive) {
     // Level 1: say once what we're pointing at.
-    if (!lock.confirmed && now - lock.insideSince > AUTO_CONFIRM_AFTER_MS) {
+    if (!lock.confirmed && held > AUTO_CONFIRM_AFTER_MS) {
       lock.confirmed = true;
       confirmObject();
     }
     return;
   }
 
-  // Level 2: hand on the beer for a moment → ask Mistral if it's actually held (close-up crop).
-  if (
-    now - lock.insideSince > GRAB_AFTER_MS &&
-    now - lock.lastGrabCheck > GRAB_RECHECK_MS &&
-    lock.grabChecks < GRAB_MAX_CHECKS &&
-    !state.busy
-  ) {
-    lock.lastGrabCheck = now;
+  // Level 2: hand on the beer long enough → GRABBED (local decision, works without Mistral),
+  // then Mistral double-checks the object in the background.
+  if (held > GRAB_AFTER_MS) grabbed(lock);
+}
+
+function grabbed(lock) {
+  state.phase = 'done'; // stops guidance beeps
+  success();
+  setTimeout(() => speak(`Got it! That's your beer${lock.kind ? ' ' + lock.kind : ''}. Cheers!`), 450);
+  if (lock.grabChecks < GRAB_MAX_CHECKS) {
     lock.grabChecks++;
-    checkHeld();
+    verifyGrab(lock);
   }
 }
 
-async function checkHeld() {
-  const lock = state.lock;
-  state.busy = true;
+// Mistral looks at a close-up of the hand. Only a clear "you're holding something ELSE" overrides
+// the local grab; slow / unsure / failed answers leave it as is.
+async function verifyGrab(lock) {
+  const image = snapshotCrop(video, lock.box, 1); // capture now, before the hand moves on
   try {
-    const res = await askMistral('held', snapshotCrop(video, lock.box, 1), 0, lock.kind);
+    const res = await askMistral('held', image, 0, lock.kind);
     const r = res.result || {};
-    const obj = String(r.object || '').toLowerCase();
-    state.mistral = `held#${lock.grabChecks} → holding=${r.holding} object=${obj} want=${lock.kind || 'can/bottle'} (${res.clientMs}ms)`;
-    if (state.lock !== lock || state.phase !== 'guiding') return; // reset meanwhile
-    // Right object = same kind as picked (or any can/bottle if the pick didn't say).
-    const right = lock.kind ? obj.includes(lock.kind) : /can|bottle/.test(obj);
-    if (r.holding && right) {
-      state.phase = 'done'; // stop guidance beeps
-      success();
-      setTimeout(() => speak(`You've got your beer${lock.kind ? ' ' + lock.kind : ''}. Cheers!`), 500);
-    } else if (r.holding && obj && obj !== 'none') {
-      speak(`That's a ${obj}, not your beer.`);
+    const obj = String(r.object || '').toLowerCase().trim();
+    const wrong = !!r.holding && !!obj && obj !== 'none' && !/can|bottle/.test(obj);
+    state.mistral = `verify#${lock.grabChecks} → holding=${r.holding} object=${obj} ${wrong ? 'WRONG' : 'ok'} (${res.clientMs}ms)`;
+    if (wrong && state.lock === lock && state.phase === 'done') {
+      speak(`Wait, that's a ${obj}, not your beer. Follow the beeps again.`, { interrupt: true });
+      lock.insideSince = 0;
+      lock.lastOnBeerAt = 0;
+      state.phase = 'guiding';
     }
-    // not holding yet → stay quiet, keep guiding; we re-check after GRAB_RECHECK_MS
   } catch (err) {
     console.error(err);
-    state.mistral = `held FAILED: ${err.message}`;
-    // Mistral down: trust the hand tracker so the demo still completes.
-    if (state.lock === lock && state.phase === 'guiding') {
-      state.phase = 'done';
-      success();
-      setTimeout(() => speak("You've got your beer."), 500);
-    }
-  } finally {
-    state.busy = false;
+    state.mistral = `verify FAILED (kept local grab): ${err.message}`;
   }
 }
 
@@ -835,7 +830,7 @@ function renderDebug() {
     gd
       ? `guide: dx=${gd.dx.toFixed(2)} dy=${gd.dy.toFixed(2)} f=${Math.round(gd.freq)}Hz every ${Math.round(gd.interval)}ms${gd.inside ? ' ON TARGET' : ''}`
       : '',
-    lock && state.handMode ? `grab: ${lock.grab || '—'}  checks ${lock.grabChecks}/${GRAB_MAX_CHECKS}` : '',
+    lock && state.handMode ? `grab: ${lock.grab || '—'}  verify ${lock.grabChecks}/${GRAB_MAX_CHECKS}` : '',
     `hand: ${state.handMode ? 'ON' : 'off'} [${state.handDelegate}] ${
       state.hand ? `tip=(${state.hand.tip.x.toFixed(2)}, ${state.hand.tip.y.toFixed(2)})` : 'no hand'
     }`,
