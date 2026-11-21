@@ -11,8 +11,8 @@
 import { beep, vibrate } from './audio.js';
 
 const BASE_FREQ = 600;
-const MIN_INTERVAL = 90; // ms between beeps when very close
-const MAX_INTERVAL = 750; // ms between beeps when far
+const MIN_INTERVAL = 55; // ms between beeps when almost touching (near-continuous rattle)
+const MAX_INTERVAL = 1300; // ms between beeps when far (slow, lonely beeps)
 const ON_TARGET_INTERVAL = 160;
 
 let lastBeep = 0;
@@ -50,10 +50,14 @@ export function guide(now, pointer, box, { silent = false } = {}) {
   }
 
   const freq = clamp(BASE_FREQ * Math.pow(2, -dy), 250, 1400); // up = higher, one octave per half-frame
-  const interval = MIN_INTERVAL + dist * (MAX_INTERVAL - MIN_INTERVAL);
+  // Exponential, not linear: every step closer multiplies the beep rate, so the change is easy
+  // to hear across the whole range (far 1.3 s → half-way ~270 ms → close ~55 ms).
+  const interval = MIN_INTERVAL * Math.pow(MAX_INTERVAL / MIN_INTERVAL, dist);
   if (!silent && now - lastBeep > interval) {
     lastBeep = now;
-    beep({ freq, pan: dx, duration: 0.07, gain: 0.3 });
+    // Shorter beeps when fast so they stay separate instead of blurring into a tone.
+    const duration = Math.max(0.025, Math.min(0.08, (interval / 1000) * 0.45));
+    beep({ freq, pan: dx, duration, gain: 0.3 });
   }
   return { inside, dx, dy, dist, freq, interval };
 }
