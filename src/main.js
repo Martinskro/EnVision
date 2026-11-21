@@ -29,6 +29,13 @@ const DETECT_EVERY = 3; // hand mode: object detector on every 3rd frame, hand t
 const HAND_NEAR_MARGIN = 0.5; // hand this close to the beer → hold the box (hand occludes the can)
 // Voice commands are opt-in (?voice): the always-on mic made iOS audio unreliable.
 const VOICE_ON = params.has('voice');
+// Hands-free for the chest mount (?auto): once a can/bottle has been in view for AUTO_STABLE_MS,
+// Helen starts the search by herself. Once per Start – after a grab the beer is in your hand, so
+// re-searching would lock a decoy. Restart with a key (Bluetooth keyboard/clicker) or a tap.
+const AUTO_ON = params.has('auto');
+const AUTO_STABLE_MS = 2000;
+let autoArmed = AUTO_ON;
+let autoSince = 0;
 
 const $ = (id) => document.getElementById(id);
 const video = $('video');
@@ -79,6 +86,22 @@ const setDebug = (on) => {
 setDebug(params.has('debug'));
 $('debugToggle').addEventListener('click', () => setDebug(document.body.classList.contains('nodebug')));
 findBtn.addEventListener('click', findBeer);
+// Bluetooth keyboard / presentation clicker paired with the phone: hands-free trigger.
+// Esc / Backspace = reset; any other key = find my beer (when not already busy guiding).
+document.addEventListener('keydown', (e) => {
+  if (startScreen.hidden === false) return;
+  if (e.key === 'Escape' || e.key === 'Backspace') {
+    e.preventDefault();
+    reset();
+    return;
+  }
+  if (e.repeat) return;
+  if (['detecting', 'done'].includes(state.phase)) {
+    e.preventDefault();
+    findBeer();
+  }
+});
+
 // "Tap anywhere": the camera area also starts a search, but only when idle (not while reaching).
 $('stage').addEventListener('click', () => {
   if (['detecting', 'done'].includes(state.phase)) findBeer();
@@ -161,9 +184,11 @@ async function greetWhenReady() {
   if (voiceOn) await Promise.race([voiceReady, new Promise((r) => setTimeout(r, 5000))]);
   const canTalk = voiceOn && isListening();
   speak(
-    canTalk
-      ? "Hi, I'm Helen. Ask me where your beer is."
-      : "Hi, I'm Helen. Tap the bottom of the screen to find your beer.",
+    AUTO_ON
+      ? "Hi, I'm Helen. Point me at the table and I'll find your beer."
+      : canTalk
+        ? "Hi, I'm Helen. Ask me where your beer is."
+        : "Hi, I'm Helen. Tap the bottom of the screen to find your beer.",
   );
 }
 
@@ -445,6 +470,18 @@ function loop(now) {
     }
     processDetections(result.detections);
     if (!handActive) state.hand = null; // keep the last hand between alternating frames
+  }
+
+  // Auto mode: a can/bottle steadily in view → start the search hands-free (once per Start).
+  if (autoArmed && state.phase === 'detecting' && !state.busy && !isSpeaking()) {
+    const drink = state.targets.some((t) => t.label === 'bottle' || t.label === 'cup');
+    if (!drink) autoSince = 0;
+    else if (!autoSince) autoSince = now;
+    else if (now - autoSince > AUTO_STABLE_MS) {
+      autoArmed = false;
+      autoSince = 0;
+      findBeer();
+    }
   }
 
   if (state.phase === 'guiding' && state.lock) {
@@ -870,6 +907,7 @@ function renderDebug() {
     `voice: ${voiceState.status}  heard: "${voiceState.heard}"\n  why: ${voiceState.why || '—'}${
       voiceState.lastIntent ? `\n  last: ${voiceState.lastIntent}` : ''
     }`,
+    AUTO_ON ? `auto: ${autoArmed ? (autoSince ? `starting in ${Math.max(0, (AUTO_STABLE_MS - (performance.now() - autoSince)) / 1000).toFixed(1)}s` : 'waiting for a can/bottle') : 'used (key/tap to search again)'}` : '',
     `mistral: ${state.mistral}`,
     state.error ? `ERROR: ${state.error}` : '',
   ]
