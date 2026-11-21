@@ -192,13 +192,13 @@ async function findBeer() {
       state.phase = 'detecting';
       return;
     }
-    lockTarget(chosen, brand, 'mistral');
+    lockTarget(chosen, brand, 'mistral', picks.length);
   } catch (err) {
     console.error(err);
     state.mistral = `pick FAILED: ${err.message}`;
     const fallback = largest(picks);
     speak('Mistral did not answer. Using the biggest bottle.');
-    lockTarget(fallback, null, 'fallback');
+    lockTarget(fallback, null, 'fallback', picks.length);
   } finally {
     state.busy = false;
     findBtn.disabled = false;
@@ -213,7 +213,7 @@ function demoPick() {
     return;
   }
   state.mistral = 'demo pick (Mistral skipped)';
-  lockTarget(largest(state.targets), null, 'demo');
+  lockTarget(largest(state.targets), null, 'demo', state.targets.length);
 }
 
 function largest(targets) {
@@ -222,7 +222,7 @@ function largest(targets) {
   return pool.reduce((a, b) => (b.box.width * b.box.height > a.box.width * a.box.height ? b : a));
 }
 
-function lockTarget(t, brand, source) {
+function lockTarget(t, brand, source, count) {
   state.lock = {
     box: { originX: t.box.originX, originY: t.box.originY, width: t.box.width, height: t.box.height },
     brand: brand && brand !== 'null' ? brand : null,
@@ -231,6 +231,9 @@ function lockTarget(t, brand, source) {
     lastSeen: performance.now(),
     insideSince: 0,
     confirmed: false,
+    rank: t.n - 1, // left→right position among the green boxes when picked
+    count, // how many green boxes there were when picked
+    matchedN: t.n, // which green box is the beer in the current frame (drawn yellow instead)
   };
   resetGuidance();
   state.phase = 'guiding';
@@ -359,37 +362,49 @@ function handleArrival(now, handActive) {
 
 // The phone moves in Level 1, so follow the locked beer by matching it to this frame's detections.
 // If nothing matches (occluded / missed), keep the last known box.
+// The yellow box IS one of the green boxes: each detector frame, decide which green box is the beer.
+//  1. Same number of green boxes as when picked → same left→right rank. Robust to the phone moving,
+//     since the whole scene shifts together.
+//  2. Otherwise → the nearest green box of similar size.
+// No match → keep the last position (drawn dashed).
 function updateLock(now, handActive) {
   const lock = state.lock;
+  lock.matchedN = null;
   // Hand on/near the can: the detector can't see it properly and might match a decoy → hold.
   lock.held = !!(handActive && state.hand && isInside(state.hand.tip, expandBox(normBox(lock.box), HAND_NEAR_MARGIN)));
   if (lock.held) return;
+
   const diag = Math.hypot(video.videoWidth, video.videoHeight);
+  const dist = (t) => Math.hypot(cx(t.box) - cx(lock.box), cy(t.box) - cy(lock.box)) / diag;
   const lockArea = lock.box.width * lock.box.height;
-  // Only bottle/cup/glass detections (incl. weak ones ≥ 0.2, since the can's score flickers).
-  // Not any label: a hand is often detected as a can-sized "person" box and would steal the lock.
-  // Fixed small radius: widening it made the lock jump to a neighbouring decoy.
-  const radius = 0.1;
+  const similarSize = (t) => {
+    const r = (t.box.width * t.box.height) / lockArea;
+    return r > 0.4 && r < 2.5;
+  };
+
   let best = null;
-  let bestScore = 0;
-  for (const t of state.all) {
-    if (!TARGET_LABELS.has(t.label)) continue;
-    const overlap = iou(lock.box, t.box);
-    const centerDist = Math.hypot(cx(t.box) - cx(lock.box), cy(t.box) - cy(lock.box)) / diag;
-    const areaRatio = (t.box.width * t.box.height) / lockArea;
-    const near = centerDist < radius && areaRatio > 0.5 && areaRatio < 2;
-    const score = overlap > 0.2 ? overlap + 1 : near ? 1 - centerDist : 0;
-    if (score > bestScore) {
-      bestScore = score;
+  let how = '';
+  const cands = state.targets;
+  if (cands.length === lock.count && lock.count > 0) {
+    const t = cands[lock.rank];
+    if (t && dist(t) < 0.3) {
       best = t;
+      how = 'rank';
     }
   }
+  if (!best) {
+    for (const t of cands) {
+      if (dist(t) < 0.2 && similarSize(t) && (!best || dist(t) < dist(best))) best = t;
+    }
+    how = 'nearest';
+  }
+
   lock.seen = !!best;
   if (best) {
     lock.lastSeen = now;
-    lock.matched = `${best.label} ${best.score.toFixed(2)}`;
-    const a = 0.6; // light smoothing against jitter
-    for (const k of ['originX', 'originY', 'width', 'height']) lock.box[k] += (best.box[k] - lock.box[k]) * a;
+    lock.matchedN = best.n;
+    lock.matched = `${how} #${best.n} ${best.label} ${best.score.toFixed(2)}`;
+    lock.box = { originX: best.box.originX, originY: best.box.originY, width: best.box.width, height: best.box.height };
   }
 }
 
@@ -509,7 +524,10 @@ function draw() {
   const unit = Math.max(canvas.width, canvas.height) / 100; // scale strokes/text to resolution
   const debugOn = !debugEl.classList.contains('hidden');
 
-  for (const t of state.targets) drawBox(ctx, t, '#00e676', unit, { number: true, label: true });
+  for (const t of state.targets) {
+    if (state.lock && t.n === state.lock.matchedN) continue; // drawn yellow below
+    drawBox(ctx, t, '#00e676', unit, { number: true, label: true });
+  }
   if (debugOn) {
     for (const o of state.others) drawBox(ctx, o, 'rgba(255,255,255,0.5)', unit, { number: false, label: true });
   }
