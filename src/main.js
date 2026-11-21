@@ -313,7 +313,7 @@ function loop(now) {
   }
 
   if (state.phase === 'guiding' && state.lock) {
-    if (runDetector) updateLock(now, handActive);
+    if (runDetector && !(handActive && params.has('freeze'))) updateLock(now, handActive);
     const silent = !!window.speechSynthesis?.speaking;
     if (handActive) {
       if (state.hand) {
@@ -366,18 +366,18 @@ function updateLock(now, handActive) {
   if (lock.held) return;
   const diag = Math.hypot(video.videoWidth, video.videoHeight);
   const lockArea = lock.box.width * lock.box.height;
-  // The longer we've lost it, the further we search (phone may have moved a lot meanwhile).
-  const lostSec = (now - lock.lastSeen) / 1000;
-  // In hand mode the phone barely moves, so never widen the search (avoids jumping to a decoy).
-  const radius = handActive ? 0.12 : Math.min(0.35, 0.12 + 0.25 * lostSec);
+  // Only bottle/cup/glass detections (incl. weak ones ≥ 0.2, since the can's score flickers).
+  // Not any label: a hand is often detected as a can-sized "person" box and would steal the lock.
+  // Fixed small radius: widening it made the lock jump to a neighbouring decoy.
+  const radius = 0.1;
   let best = null;
   let bestScore = 0;
-  // Search every detection (any label, score ≥ 0.2): the can's label/score flickers frame to frame.
   for (const t of state.all) {
+    if (!TARGET_LABELS.has(t.label)) continue;
     const overlap = iou(lock.box, t.box);
     const centerDist = Math.hypot(cx(t.box) - cx(lock.box), cy(t.box) - cy(lock.box)) / diag;
     const areaRatio = (t.box.width * t.box.height) / lockArea;
-    const near = centerDist < radius && areaRatio > 0.33 && areaRatio < 3;
+    const near = centerDist < radius && areaRatio > 0.5 && areaRatio < 2;
     const score = overlap > 0.2 ? overlap + 1 : near ? 1 - centerDist : 0;
     if (score > bestScore) {
       bestScore = score;
@@ -387,6 +387,7 @@ function updateLock(now, handActive) {
   lock.seen = !!best;
   if (best) {
     lock.lastSeen = now;
+    lock.matched = `${best.label} ${best.score.toFixed(2)}`;
     const a = 0.6; // light smoothing against jitter
     for (const k of ['originX', 'originY', 'width', 'height']) lock.box[k] += (best.box[k] - lock.box[k]) * a;
   }
@@ -591,8 +592,8 @@ function renderDebug() {
     `others: ${state.others.map(fmt).join(', ') || '—'}`,
     lock
       ? `lock: ${lock.source} ${lock.brand || ''} ${
-          lock.held ? 'HELD (hand near)' : lock.seen ? 'seen' : `LOST ${((performance.now() - lock.lastSeen) / 1000).toFixed(1)}s`
-        }`
+          lock.held ? 'HELD (hand near)' : lock.seen ? `seen as ${lock.matched || '-'}` : `LOST ${((performance.now() - lock.lastSeen) / 1000).toFixed(1)}s`
+        }${params.has('freeze') ? ' [freeze]' : ''}`
       : 'lock: —',
     gd
       ? `guide: dx=${gd.dx.toFixed(2)} dy=${gd.dy.toFixed(2)} f=${Math.round(gd.freq)}Hz every ${Math.round(gd.interval)}ms${gd.inside ? ' ON TARGET' : ''}`
