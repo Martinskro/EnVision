@@ -2,7 +2,7 @@
 
 const TIMEOUT_MS = 15000;
 
-export async function askMistral(task, imageDataUrl, count = 0) {
+export async function askMistral(task, imageDataUrl, count = 0, kind = null) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   const t0 = performance.now();
@@ -10,7 +10,7 @@ export async function askMistral(task, imageDataUrl, count = 0) {
     const r = await fetch('/api/mistral', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task, image: imageDataUrl, count }),
+      body: JSON.stringify({ task, image: imageDataUrl, count, kind }),
       signal: ctrl.signal,
     });
     const data = await r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` }));

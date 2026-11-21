@@ -20,6 +20,8 @@ const HAND_BOX_MARGIN = 0.15; // fingertip touching the can's edge counts as ins
 const DETECT_EVERY = 3; // hand mode: object detector on every 3rd frame, hand tracker on the rest
 const HAND_NEAR_MARGIN = 0.5; // hand this close to the beer → hold the box (hand occludes the can)
 const params = new URLSearchParams(location.search);
+// Voice commands are opt-in (?voice): the always-on mic made iOS audio unreliable.
+const VOICE_ON = params.has('voice');
 
 const $ = (id) => document.getElementById(id);
 const video = $('video');
@@ -40,7 +42,7 @@ const state = {
   targets: [], // [{ n, label, score, box: {originX, originY, width, height} }] in video pixels
   others: [],
   all: [], // every detection ≥ 0.2, any label – used to keep tracking the locked beer
-  lock: null, // { box, brand, source, seen, lastSeen, insideSince, confirmed }
+  lock: null, // { box, kind, source, seen, lastSeen, insideSince, confirmed, … }
   guidance: null,
   handMode: loadHandMode(), // Level 2: guide the fingertip (phone static) instead of the phone
   handDelegate: '-',
@@ -103,7 +105,7 @@ async function start() {
   unlockAudio();
   unlockSpeech();
   // Voice commands ("Hey Helen, where is my beer?"). Must start inside the tap on iOS.
-  if (!params.has('novoice')) {
+  if (VOICE_ON) {
     startVoice(
       {
         find: findBeer,
@@ -148,7 +150,7 @@ async function start() {
 
 // Greet only after camera + mic permissions are settled (mic: granted, refused, or 5 s max).
 async function greetWhenReady() {
-  const voiceOn = !params.has('novoice');
+  const voiceOn = VOICE_ON;
   if (voiceOn) await Promise.race([voiceReady, new Promise((r) => setTimeout(r, 5000))]);
   const canTalk = voiceOn && isListening();
   speak(
@@ -268,15 +270,15 @@ async function findBeer() {
 
   try {
     const res = await askMistral('pick', image, picks.length);
-    const { beer, brand, reason } = res.result || {};
-    state.mistral = `pick → beer=${beer} brand=${brand} (${res.clientMs}ms, ${res.model}) ${reason || ''}`;
+    const { beer, kind, objects } = res.result || {};
+    state.mistral = `pick → beer=${beer} kind=${kind} ${JSON.stringify(objects || {})} (${res.clientMs}ms)`;
     const chosen = picks.find((t) => t.n === Number(beer));
     if (!chosen) {
       speak("I couldn't find a beer here. Try pointing at the table again.");
       state.phase = 'detecting';
       return;
     }
-    lockTarget(chosen, brand, 'mistral', picks.length);
+    lockTarget(chosen, normKind(kind), 'mistral', picks.length);
   } catch (err) {
     console.error(err);
     state.mistral = `pick FAILED: ${err.message}`;
@@ -306,10 +308,15 @@ function largest(targets) {
   return pool.reduce((a, b) => (b.box.width * b.box.height > a.box.width * a.box.height ? b : a));
 }
 
-function lockTarget(t, brand, source, count) {
+function normKind(k) {
+  const v = String(k || '').toLowerCase();
+  return v.includes('can') ? 'can' : v.includes('bottle') ? 'bottle' : null;
+}
+
+function lockTarget(t, kind, source, count) {
   state.lock = {
     box: { originX: t.box.originX, originY: t.box.originY, width: t.box.width, height: t.box.height },
-    brand: brand && brand !== 'null' ? brand : null,
+    kind, // 'can' | 'bottle' | null – what the beer is, used to check what's held
     source,
     seen: true,
     lastSeen: performance.now(),
@@ -326,7 +333,7 @@ function lockTarget(t, brand, source, count) {
   };
   resetGuidance();
   state.phase = 'guiding';
-  const what = state.lock.brand ? `a ${state.lock.brand}` : 'the beer';
+  const what = state.lock.kind ? `your beer ${state.lock.kind}` : 'your beer';
   const how = state.handMode ? 'Reach out your hand and follow the beeps.' : 'Follow the beeps.';
   speak(`Found ${what}, ${direction(state.lock.box)}. ${how}`);
 }
@@ -345,7 +352,7 @@ async function confirmObject() {
   try {
     const res = await askMistral('confirm', snapshot(video, null, 0.85));
     const r = res.result || {};
-    state.mistral = `confirm → ${r.object} / ${r.brand} beer=${r.is_beer} (${res.clientMs}ms)`;
+    state.mistral = `confirm → ${r.object} (${res.clientMs}ms)`;
     speak(r.say || `This is ${r.object || 'something I cannot recognise'}.`);
   } catch (err) {
     console.error(err);
@@ -508,16 +515,19 @@ async function checkHeld() {
   const lock = state.lock;
   state.busy = true;
   try {
-    const res = await askMistral('held', snapshotCrop(video, lock.box, 1));
+    const res = await askMistral('held', snapshotCrop(video, lock.box, 1), 0, lock.kind);
     const r = res.result || {};
-    state.mistral = `held#${lock.grabChecks} → holding=${r.holding} ${r.object}/${r.brand} beer=${r.is_beer} (${res.clientMs}ms)`;
+    const obj = String(r.object || '').toLowerCase();
+    state.mistral = `held#${lock.grabChecks} → holding=${r.holding} object=${obj} want=${lock.kind || 'can/bottle'} (${res.clientMs}ms)`;
     if (state.lock !== lock || state.phase !== 'guiding') return; // reset meanwhile
-    if (r.holding && r.is_beer) {
+    // Right object = same kind as picked (or any can/bottle if the pick didn't say).
+    const right = lock.kind ? obj.includes(lock.kind) : /can|bottle/.test(obj);
+    if (r.holding && right) {
       state.phase = 'done'; // stop guidance beeps
       success();
-      setTimeout(() => speak(r.say || `You're holding ${lock.brand ? 'a ' + lock.brand : 'your beer'}. Cheers!`), 500);
-    } else if (r.holding) {
-      speak(r.say || "That's not your beer.");
+      setTimeout(() => speak(`You've got your beer${lock.kind ? ' ' + lock.kind : ''}. Cheers!`), 500);
+    } else if (r.holding && obj && obj !== 'none') {
+      speak(`That's a ${obj}, not your beer.`);
     }
     // not holding yet → stay quiet, keep guiding; we re-check after GRAB_RECHECK_MS
   } catch (err) {
@@ -715,7 +725,7 @@ function draw() {
   }
 
   if (state.lock) {
-    const name = state.lock.brand ? `BEER: ${state.lock.brand}` : 'BEER';
+    const name = state.lock.kind ? `BEER (${state.lock.kind})` : 'BEER';
     ctx.setLineDash(state.lock.seen || state.lock.held ? [] : [unit * 2, unit]);
     drawBox(ctx, { label: name, box: state.lock.box }, '#ffd600', unit * 1.6, { number: false, label: true });
     ctx.setLineDash([]);
@@ -797,7 +807,7 @@ function renderStatus() {
   if (findSub.textContent !== sub) findSub.textContent = sub;
 
   const on = isListening() && voiceState.status !== 'paused';
-  micEl.textContent = !voiceState.status || voiceState.status === 'unsupported' || params.has('novoice')
+  micEl.textContent = !voiceState.status || voiceState.status === 'unsupported' || !VOICE_ON
     ? ''
     : on
       ? '● listening'
@@ -818,7 +828,7 @@ function renderDebug() {
     `targets: ${state.targets.map(fmt).join(', ') || '—'}`,
     `others: ${state.others.map(fmt).join(', ') || '—'}`,
     lock
-      ? `lock: ${lock.source} ${lock.brand || ''} ${
+      ? `lock: ${lock.source} ${lock.kind || ''} ${
           lock.held ? 'HELD (hand near)' : lock.seen ? `seen as ${lock.matched || '-'}` : `LOST ${((performance.now() - lock.lastSeen) / 1000).toFixed(1)}s`
         }${params.has('freeze') ? ' [freeze]' : ''}\nsims: ${lock.sims || '—'}`
       : 'lock: —',

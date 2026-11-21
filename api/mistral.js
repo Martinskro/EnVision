@@ -7,40 +7,46 @@ const MISTRAL_URL = 'https://api.mistral.ai/v1/chat/completions';
 const DEFAULT_MODEL = 'mistral-medium-latest'; // vision-capable; override with MISTRAL_MODEL
 const MAX_IMAGE_CHARS = 4_000_000; // stay under Vercel's 4.5 MB body limit
 
-function prompts(task, count) {
+const KINDS = 'can, bottle, cup, glass, other';
+
+function prompts(task, count, kind) {
   if (task === 'pick') {
     return [
       `This photo shows a table. ${count} objects are outlined with green boxes.`,
       `Each box has a number (1 to ${count}) in a green circle at its top-left corner.`,
-      'Which numbered object is the beer (a beer can or beer bottle)? Read the brand if visible.',
+      `First classify each numbered object as one of: ${KINDS}.`,
+      'Then say which number is the beer: a beer can (metal/aluminium can) or a beer bottle (usually brown or green glass).',
+      'Clear water bottles, plastic bottles, cups and mugs are NOT the beer. If there is exactly one can, it is the beer.',
+      'Ignore brands and labels.',
       'Reply with JSON only, exactly this shape:',
-      '{"beer": <number or null if no beer>, "brand": "<brand name or null>", "reason": "<max 10 words>"}',
+      '{"objects": {"1": "<kind>", "2": "<kind>"}, "beer": <number or null if no beer>, "kind": "<can|bottle|null>"}',
     ].join('\n');
   }
   if (task === 'held') {
     return [
-      'Close-up from a chest-mounted camera. A blind person is reaching for their beer on a table.',
-      'Is a hand holding, gripping or touching an object (a can, bottle or cup)? If yes, which object is it?',
+      'Close-up from a chest-mounted camera. A blind person is reaching for an object on a table.',
+      'Is a hand holding, gripping or touching an object? If yes, what kind of object is it?',
+      `Kinds: ${KINDS}. Ignore brands and labels.`,
       'Reply with JSON only, exactly this shape:',
-      '{"holding": <true|false>, "object": "<short name or null>", "brand": "<brand or null>", "is_beer": <true|false>,',
-      ' "say": "<one short sentence to speak to the user, e.g. \\"You\'re holding a Tuborg. Cheers!\\" or \\"That\'s the water bottle, not your beer.\\">"}',
+      '{"holding": <true|false>, "object": "<kind or none>"}',
     ].join('\n');
   }
   if (task === 'describe') {
     return [
       "Photo from a blind person's chest-mounted camera, looking at a table in front of them.",
       'Briefly tell them what is on the table and where (left / middle / right, near / far).',
-      'Mention any drinks and their brands. Maximum 2 short sentences, friendly, no filler.',
+      'Name drinks by container type (can, bottle, cup, glass). Do not mention brands.',
+      'Maximum 2 short sentences, friendly, no filler.',
       'Reply with JSON only, exactly this shape: {"say": "<what to speak aloud>"}',
     ].join('\n');
   }
   // confirm
   return [
-    'A blind person is using their phone camera to find their beer.',
+    'A blind person is pointing their phone camera at something.',
     'Identify the object they are holding, or if no hand is holding anything, the main object in the center of the image.',
+    `Use a simple kind (${KINDS}, or another short name). Do not mention brands.`,
     'Reply with JSON only, exactly this shape:',
-    '{"object": "<short name>", "brand": "<brand or null>", "is_beer": <true|false>,',
-    ' "say": "<one short sentence to speak aloud, e.g. \\"You\'re holding a Tuborg can.\\">"}',
+    '{"object": "<short name>", "say": "<one short sentence to speak aloud, e.g. \\"This is a can.\\">"}',
   ].join('\n');
 }
 
@@ -61,6 +67,7 @@ export default async function handler(req, res) {
   if (!key) return res.status(500).json({ ok: false, error: 'MISTRAL_API_KEY not set' });
 
   const { task, image, count } = req.body || {};
+  const kind = String(req.body?.kind || '').replace(/[^a-z ]/gi, '').slice(0, 20) || null;
   if (!['pick', 'confirm', 'held', 'describe'].includes(task)) {
     return res.status(400).json({ ok: false, error: 'task must be pick, confirm, held or describe' });
   }
@@ -83,7 +90,7 @@ export default async function handler(req, res) {
           {
             role: 'user',
             content: [
-              { type: 'text', text: prompts(task, Number(count) || 0) },
+              { type: 'text', text: prompts(task, Number(count) || 0, kind) },
               { type: 'image_url', image_url: image },
             ],
           },
