@@ -1,5 +1,5 @@
 import './style.css';
-import { unlockAudio, audioState, beep, speak, success } from './audio.js';
+import { unlockAudio, audioState, beep, speak, success, isSpeaking } from './audio.js';
 import { createObjectDetector, createHandLandmarker, DETECTOR_NAME } from './vision.js';
 import { askMistral, snapshot, snapshotCrop } from './mistral.js';
 import { guide, noPointerTick, resetGuidance } from './guidance.js';
@@ -83,7 +83,7 @@ async function start() {
         stop: reset,
         wake: () => speak('Yes?'),
       },
-      () => !!window.speechSynthesis?.speaking,
+      isSpeaking,
     );
   }
   beep({ freq: 660, duration: 0.12 });
@@ -362,7 +362,7 @@ function loop(now) {
 
   if (state.phase === 'guiding' && state.lock) {
     if (runDetector && !(handActive && params.has('freeze'))) updateLock(now, handActive);
-    const silent = !!window.speechSynthesis?.speaking;
+    const silent = isSpeaking();
     if (handActive) {
       if (state.hand) {
         state.guidance = guide(now, state.hand.tip, expandBox(normBox(state.lock.box), HAND_BOX_MARGIN), { silent });
@@ -731,7 +731,9 @@ function renderDebug() {
     `hand: ${state.handMode ? 'ON' : 'off'} [${state.handDelegate}] ${
       state.hand ? `tip=(${state.hand.tip.x.toFixed(2)}, ${state.hand.tip.y.toFixed(2)})` : 'no hand'
     }`,
-    `voice: ${voiceState.status}  heard: "${voiceState.heard}"${voiceState.lastIntent ? `\n  → ${voiceState.lastIntent}` : ''}`,
+    `voice: ${voiceState.status}  heard: "${voiceState.heard}"\n  why: ${voiceState.why || '—'}${
+      voiceState.lastIntent ? `\n  last: ${voiceState.lastIntent}` : ''
+    }`,
     `mistral: ${state.mistral}`,
     state.error ? `ERROR: ${state.error}` : '',
   ]

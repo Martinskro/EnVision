@@ -24,6 +24,7 @@ export const voiceState = {
   status: SR ? 'off' : 'unsupported', // off | listening | armed | error:… | unsupported
   heard: '',
   lastIntent: '',
+  why: '', // why the last thing heard did (not) trigger – for the debug overlay
 };
 
 let rec = null;
@@ -47,11 +48,18 @@ export function startVoice(onIntent, speaking) {
   rec.maxAlternatives = 1;
 
   rec.onresult = (e) => {
-    const r = e.results[e.results.length - 1];
-    const text = r[0].transcript.toLowerCase().trim();
+    // "Hey Helen" and "where is my beer" often arrive as separate results after a short pause,
+    // so match on the last two results joined, not only the latest one.
+    const n = e.results.length;
+    const parts = [];
+    for (let i = Math.max(0, n - 2); i < n; i++) parts.push(e.results[i][0].transcript);
+    const text = parts.join(' ').toLowerCase().replace(/[.,!?]/g, ' ').replace(/\s+/g, ' ').trim();
     voiceState.heard = text;
-    if (isSpeaking()) return; // ignore Helen hearing herself
-    handle(text, r.isFinal);
+    if (isSpeaking()) {
+      voiceState.why = 'ignored: Helen is speaking';
+      return;
+    }
+    handle(text, e.results[n - 1].isFinal);
   };
   rec.onerror = (e) => {
     voiceState.status = `error: ${e.error}`;
@@ -86,11 +94,18 @@ function safeStart() {
 
 function handle(text, isFinal) {
   const now = performance.now();
-  if (now - lastFire < COOLDOWN_MS) return;
+  if (now - lastFire < COOLDOWN_MS) {
+    voiceState.why = 'ignored: cooldown';
+    return;
+  }
 
   const wake = WAKE.test(text);
+  if (wake) armedUntil = Math.max(armedUntil, now + ARMED_MS); // a command may follow in a later result
   const armed = now < armedUntil;
-  if (!wake && !armed) return;
+  if (!wake && !armed) {
+    voiceState.why = 'no wake word';
+    return;
+  }
 
   // Only look at what comes after the wake word ("hey helen where is my beer" → "where is my beer").
   const m = text.match(WAKE);
@@ -101,10 +116,11 @@ function handle(text, isFinal) {
     fire(hit.intent, now, text);
     return;
   }
+  voiceState.why = 'wake word, waiting for command';
+  voiceState.status = 'armed';
   // Wake word alone, sentence finished → "Yes?" and wait for the command.
-  if (wake && isFinal) {
+  if (wake && isFinal && command.trim() === '') {
     armedUntil = now + ARMED_MS;
-    voiceState.status = 'armed';
     lastFire = now - COOLDOWN_MS + 800; // short pause so "Yes?" isn't interrupted by the same result
     handlers.wake?.();
   }
@@ -115,6 +131,7 @@ function fire(intent, now, text) {
   armedUntil = 0;
   voiceState.status = 'listening';
   voiceState.lastIntent = `${intent} ← "${text}"`;
+  voiceState.why = `fired: ${intent}`;
   // Restart the session so the same utterance isn't matched again by later interim results.
   try {
     rec.abort();

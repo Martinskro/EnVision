@@ -60,13 +60,27 @@ export function vibrate(ms) {
 
 // iOS only allows speechSynthesis after a first speak() inside a user gesture,
 // so call speak() once from the Start tap handler.
+//
+// isSpeaking() uses our own timer instead of speechSynthesis.speaking, which can get stuck on
+// true (seen with the mic active) – that silently blocked voice commands and guidance beeps.
+let speakingUntil = 0;
+
 export function speak(text) {
   if (!('speechSynthesis' in window)) return;
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'en-US';
   u.rate = 1.05;
+  // Upper bound for how long this takes to say; cleared early when the utterance really ends.
+  speakingUntil = performance.now() + Math.min(8000, 800 + text.length * 75);
+  u.onend = u.onerror = () => {
+    speakingUntil = 0;
+  };
   window.speechSynthesis.speak(u);
+}
+
+export function isSpeaking() {
+  return performance.now() < speakingUntil;
 }
 
 // Short rising "success" arpeggio when the beer is confirmed in hand.
