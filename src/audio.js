@@ -81,27 +81,61 @@ export function onSpeak(fn) {
   speakListener = fn;
 }
 
-export function speak(text) {
+// Keep references to queued/playing utterances: Safari/Chrome can garbage-collect them
+// mid-sentence, which cuts the speech off (and onend never fires).
+const liveUtterances = new Set();
+let speechToken = 0;
+let speakReadyAt = 0; // keeps queued phrases in order even when an earlier one waits for the mic
+
+// Phrases QUEUE by default (so "Looking for your beer" isn't cut off by "Found a Tuborg…").
+// interrupt: true replaces whatever Helen is saying (Reset, "Yes?").
+export function speak(text, { interrupt = false } = {}) {
   if (!('speechSynthesis' in window)) return;
-  // Half-duplex: turn the mic off first. If it was on, give iOS a moment to switch the
-  // audio session back to playback before talking.
   speakListener?.(text);
+  const token = ++speechToken;
+  const synth = window.speechSynthesis;
+
+  // Half-duplex: turn the mic off first. If it was on, give iOS time to switch the audio
+  // session back to playback, otherwise the start of the sentence gets swallowed.
   const wasListening = pauseVoice();
-  const delay = wasListening ? 300 : 0;
-  // Upper bound for how long this takes to say; cleared early when the utterance really ends.
-  speakingUntil = performance.now() + delay + Math.min(8000, 800 + text.length * 75);
+  const busy = synth.speaking || synth.pending;
+  if (interrupt && busy) {
+    synth.cancel();
+    liveUtterances.clear();
+  }
+  // Chrome drops an utterance spoken right after cancel() → leave a small gap.
+  const delay = wasListening ? 450 : interrupt && busy ? 80 : 0;
+
+  // "Speaking" lasts until the LAST queued phrase ends (+ tail); the estimate is a fallback
+  // in case onend never fires.
+  const now = performance.now();
+  const at = interrupt ? now + delay : Math.max(now + delay, speakReadyAt);
+  speakReadyAt = at;
+  const estimate = Math.min(10000, 1000 + text.length * 80);
+  speakingUntil = (interrupt ? at : Math.max(at, speakingUntil)) + estimate;
+
   const say = () => {
-    window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'en-US';
     u.rate = 1.05;
-    u.onend = u.onerror = () => {
-      speakingUntil = 0;
+    let started = false;
+    u.onstart = () => {
+      started = true;
     };
-    window.speechSynthesis.speak(u);
+    const finished = () => {
+      liveUtterances.delete(u);
+      // Only the newest phrase may end "speaking". cancel() fires onerror/onend for older
+      // phrases – that used to reopen the mic mid-sentence, which cut speech off on iOS.
+      if (token !== speechToken) return;
+      if (started) speakingUntil = performance.now() + 400;
+    };
+    u.onend = finished;
+    u.onerror = finished;
+    liveUtterances.add(u);
+    synth.speak(u);
   };
-  if (delay) setTimeout(say, delay);
-  else say(); // keep synchronous when possible (first speak must be inside the Start tap on iOS)
+  if (at > now) setTimeout(say, at - now);
+  else say();
 }
 
 // Unlock speech on iOS without saying anything: call inside the Start tap.

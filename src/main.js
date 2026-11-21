@@ -110,7 +110,7 @@ async function start() {
         holding: () => confirmObject(),
         describe: describeTable,
         stop: reset,
-        wake: () => speak('Yes?'),
+        wake: () => speak('Yes?', { interrupt: true }),
         heard: (text) => showSub(subYou, `“${text.charAt(0).toUpperCase() + text.slice(1)}”`),
       },
       isSpeaking,
@@ -379,7 +379,7 @@ function reset() {
   state.lock = null;
   state.guidance = null;
   if (['guiding', 'asking', 'done'].includes(state.phase)) state.phase = 'detecting';
-  speak('Reset');
+  speak('Reset', { interrupt: true });
 }
 
 // ---------- Main loop ----------
